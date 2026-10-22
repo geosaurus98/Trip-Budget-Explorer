@@ -29,6 +29,14 @@ class Trip:
     rates: dict[str, Decimal] = field(default_factory=dict)
     notes: str = ""
     is_demo: bool = False
+    # Personal trade-off settings for "is the cheaper route worth it?".
+    # How much one hour of one traveller's time is worth, in NZD (0 = not set).
+    time_value_nzd_per_hour: Decimal = Decimal("0")
+    # Extra hours of "disruption" added to a leg marked as disruptive
+    # (overnight, very early start, etc.) when weighing time against money.
+    disruption_penalty_hours: Decimal = Decimal("0")
+    # Optional names, used to record who paid for what. Ideally one per traveller.
+    traveller_names: list[str] = field(default_factory=list)
     id: int | None = None
 
 
@@ -63,6 +71,13 @@ class TransportLeg:
     status: str = "estimated"
     notes: str = ""
     source_url: str = ""
+    # Overnight, very early or otherwise disruptive travel. Adds the trip's
+    # disruption penalty hours in time-value comparisons (not to raw hours).
+    disruptive: bool = False
+    # Optional deadlines: book before this date / cancel free of charge until this date.
+    book_by: date | None = None
+    cancel_by: date | None = None
+    paid_by: str = ""  # traveller name; "" = not paid yet / not recorded
     position: int = 0
     # None means the leg is part of the active itinerary; otherwise it belongs
     # to a route option and is excluded from active totals.
@@ -85,6 +100,9 @@ class Expense:
     # is the stop's number of nights (recalculated live from its dates).
     nights_from_stop: bool = False
     notes: str = ""
+    book_by: date | None = None
+    cancel_by: date | None = None
+    paid_by: str = ""
     option_id: int | None = None
     id: int | None = None
 
@@ -103,6 +121,36 @@ class RouteOption:
 
 
 @dataclass
+class TodoItem:
+    """A trip checklist item (visa, insurance, vaccinations…)."""
+
+    trip_id: int | None
+    title: str
+    due: date | None = None
+    done: bool = False
+    notes: str = ""
+    id: int | None = None
+
+
+@dataclass
+class CostSnapshot:
+    """A leg's or expense's cost fields as saved at one moment.
+
+    For legs, ``amount`` is base fare + additional costs and ``quantity`` is 1.
+    For expenses, ``amount`` is the unit price.
+    """
+
+    record_type: str  # "leg" or "expense"
+    record_id: int
+    recorded_at: str  # ISO timestamp, local time
+    status: str
+    amount: Decimal
+    quantity: Decimal
+    currency: str
+    basis: str
+
+
+@dataclass
 class TripBundle:
     """A whole trip with all its records, used for import/export and seeding.
 
@@ -117,3 +165,4 @@ class TripBundle:
     legs: list[TransportLeg] = field(default_factory=list)
     expenses: list[Expense] = field(default_factory=list)
     options: list[RouteOption] = field(default_factory=list)
+    todos: list[TodoItem] = field(default_factory=list)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pandas as pd
@@ -11,6 +12,7 @@ from ..calculations import summarize
 from ..demo import demo_trip_ids, load_demo_trip
 from ..models import Trip
 from ..money import normalise_currency, to_decimal
+from ..report import trip_summary_html
 from ..storage import Repository
 from ..transfer import ImportValidationError, budget_csv, export_json, parse_json
 from .common import confirm_delete, flash, money_input, safe_filename, saved, select_trip
@@ -40,6 +42,23 @@ def _trip_settings(repo: Repository, trip: Trip) -> None:
         travellers = c3.number_input("Number of travellers", min_value=1, value=trip.travellers, step=1,
                                      key=f"{k}_trav")
         budget = money_input(st, "Budget for the whole group (NZD)", trip.budget_nzd, f"{k}_budget")
+        names_text = st.text_input(
+            "Traveller names (optional, comma-separated)", ", ".join(trip.traveller_names), key=f"{k}_names",
+            placeholder="Alex, Sam", help="Used to record who paid for each cost and to work out who owes whom.",
+        )
+        st.markdown("**Is the cheaper route worth it?** Used on the Compare screen.")
+        c1, c2 = st.columns(2)
+        time_value = money_input(
+            c1, "Value of one hour of one traveller's time (NZD)", trip.time_value_nzd_per_hour, f"{k}_tv",
+            help="What you'd pay to save an hour of travel, per person. 0 = not set: the Compare screen then shows "
+                 "the break-even value instead of a verdict.",
+        )
+        penalty = c2.number_input(
+            "Disruption penalty per disruptive leg (hours)", min_value=0.0,
+            value=float(trip.disruption_penalty_hours), step=0.5, key=f"{k}_pen",
+            help="Extra hours counted for each leg marked disruptive (overnight, very early start…), "
+                 "e.g. 3 means a red-eye feels like 3 more hours of travel.",
+        )
         notes = st.text_area("Notes", trip.notes, key=f"{k}_notes")
         submitted = st.form_submit_button("Save trip settings", type="primary")
     if submitted:
@@ -48,6 +67,15 @@ def _trip_settings(repo: Repository, trip: Trip) -> None:
             return
         trip.name, trip.start_date, trip.end_date = name.strip(), start, end
         trip.travellers, trip.budget_nzd, trip.notes = int(travellers), budget, notes
+        trip.time_value_nzd_per_hour, trip.disruption_penalty_hours = time_value, to_decimal(penalty)
+        names = [n.strip() for n in names_text.split(",") if n.strip()]
+        if len({n.lower() for n in names}) != len(names):
+            st.error("Traveller names must be different from each other.")
+            return
+        trip.traveller_names = names
+        if names and len(names) != trip.travellers:
+            flash(f"You entered {len(names)} name(s) for {trip.travellers} traveller(s). Shared costs are split "
+                  "between the named people only.", "warning")
         repo.update_trip(trip)
         if start and end and end < start:
             flash("End date is before start date — saved anyway.", "warning")
@@ -101,12 +129,28 @@ def _rates(repo: Repository, trip: Trip) -> None:
 
 def _export(repo: Repository, trip: Trip) -> None:
     st.subheader("Export")
-    c1, c2 = st.columns(2)
-    c1.download_button("⬇ Export whole trip (JSON)", export_json(repo.load_bundle(trip.id)),
+    bundle = repo.load_bundle(trip.id)
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("⬇ Trip summary (HTML)", trip_summary_html(bundle, date.today()),
+                       file_name=safe_filename(trip, "summary.html"), mime="text/html",
+                       help="A printable one-page summary to share. Open it in a browser; print or save as PDF.")
+    c2.download_button("⬇ Export whole trip (JSON)", export_json(bundle),
                        file_name=safe_filename(trip, "trip.json"), mime="application/json")
     summary = summarize(trip, repo.list_legs(trip.id), repo.list_expenses(trip.id), repo.list_destinations(trip.id))
-    c2.download_button("⬇ Budget breakdown (CSV)", budget_csv(summary), file_name=safe_filename(trip, "budget.csv"),
+    c3.download_button("⬇ Budget breakdown (CSV)", budget_csv(summary), file_name=safe_filename(trip, "budget.csv"),
                        mime="text/csv")
+
+    st.subheader("Duplicate this trip")
+    st.caption("Make a copy to try a different version (then compare them under **Compare trips**). "
+               "The copy includes stops, legs, expenses and route options, but starts with fresh cost history.")
+    with st.form(f"dup_{trip.id}", clear_on_submit=True):
+        name = st.text_input("Name for the copy", f"{trip.name} (copy)", key=f"dup_name_{trip.id}")
+        if st.form_submit_button("Duplicate trip"):
+            if not name.strip():
+                st.error("Enter a name for the copy.")
+            else:
+                select_trip(repo.duplicate_trip(trip.id, name.strip()))
+                saved(f"Created '{name.strip()}'. It is now the selected trip.")
 
 
 def _import(repo: Repository) -> None:

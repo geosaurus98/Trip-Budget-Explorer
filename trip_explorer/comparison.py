@@ -19,6 +19,17 @@ example the flight). The option with the lower headline fare is the
 
 If the remaining allowance is negative the cheaper fare has already lost its
 saving; the excess is reported instead of a positive allowance.
+
+Time value ("is it worth it?")
+------------------------------
+* effective hours = door-to-door hours + disruption penalty hours for each
+  leg marked disruptive (overnight, very early start…).
+* time cost (group NZD) = time value per person-hour × travellers × effective hours.
+* generalised cost = total cost + time cost. The option with the lower
+  generalised cost is the better deal for you.
+* break-even time value (NZD per person-hour) = cost saving ÷ (extra effective
+  hours × travellers). If one traveller-hour is worth less than this to you,
+  the cheaper-but-slower option is worth it.
 """
 
 from __future__ import annotations
@@ -46,6 +57,8 @@ class OptionSummary:
     headline_auto_selected: bool
     travel_hours: Decimal
     transfers: int
+    effective_hours: Decimal = Decimal("0")  # travel hours + disruption penalties
+    disruptive_legs: int = 0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -111,6 +124,8 @@ def summarize_option(
         except MissingRateError:
             pass
 
+    travel_hours = sum((leg.duration_hours for leg in legs), Decimal("0"))
+    disruptive = sum(1 for leg in legs if leg.disruptive)
     return OptionSummary(
         option=option,
         legs=legs,
@@ -123,8 +138,10 @@ def summarize_option(
         headline_leg=headline,
         headline_fare_nzd=headline_fare,
         headline_auto_selected=auto,
-        travel_hours=sum((leg.duration_hours for leg in legs), Decimal("0")),
+        travel_hours=travel_hours,
         transfers=max(len(legs) - 1, 0),
+        effective_hours=travel_hours + disruptive * trip.disruption_penalty_hours,
+        disruptive_legs=disruptive,
         warnings=warnings,
     )
 
@@ -146,6 +163,73 @@ class BreakEven:
         return self.remaining_allowance_nzd > 0
 
 
+def time_cost_nzd(summary: OptionSummary, value_per_person_hour: Decimal, travellers: int) -> Decimal:
+    """Group NZD value of the option's effective travel time."""
+    return round_money(value_per_person_hour * travellers * summary.effective_hours)
+
+
+def generalised_cost_nzd(summary: OptionSummary, value_per_person_hour: Decimal, travellers: int) -> Decimal:
+    return summary.total_nzd + time_cost_nzd(summary, value_per_person_hour, travellers)
+
+
+@dataclass
+class TimeValueVerdict:
+    value_per_person_hour: Decimal  # 0 means "not set"
+    time_cost_a_nzd: Decimal
+    time_cost_b_nzd: Decimal
+    generalised_a_nzd: Decimal
+    generalised_b_nzd: Decimal
+    better: str | None  # lower generalised cost; None if equal or value not set
+    break_even_value_per_person_hour: Decimal | None  # only for a cheaper-but-slower trade-off
+    verdict: str
+
+
+def _time_value(a: OptionSummary, b: OptionSummary, travellers: int, value: Decimal) -> TimeValueVerdict:
+    cost_diff = b.total_nzd - a.total_nzd
+    cheaper = None if cost_diff == 0 else ("A" if cost_diff > 0 else "B")
+    break_even = None
+    if cheaper and travellers > 0:
+        cheap, other = (a, b) if cheaper == "A" else (b, a)
+        extra_hours = cheap.effective_hours - other.effective_hours
+        if extra_hours > 0:
+            break_even = round_money(abs(cost_diff) / (extra_hours * travellers))
+
+    gen_a = generalised_cost_nzd(a, value, travellers)
+    gen_b = generalised_cost_nzd(b, value, travellers)
+    better = None
+    if value > 0 and gen_a != gen_b:
+        better = "A" if gen_a < gen_b else "B"
+
+    if break_even is None:
+        if cheaper is None:
+            verdict = "Same cost, so the decision is purely about time and comfort."
+        else:
+            verdict = (f"No trade-off: option {cheaper} is cheaper without taking longer "
+                       "(including disruption), so it wins at any time value.")
+    elif value <= 0:
+        verdict = (f"Option {cheaper} is worth it only if one traveller-hour is worth less than "
+                   f"NZD {break_even:,.2f} to you. Set your time value in Settings for a direct verdict.")
+    elif better == cheaper:
+        verdict = (f"Worth it: at NZD {value:,.2f} per person-hour, option {cheaper}'s saving outweighs its extra "
+                   f"time (break-even NZD {break_even:,.2f}).")
+    elif better is None:
+        verdict = f"Break-even: at NZD {value:,.2f} per person-hour both options cost you the same overall."
+    else:
+        verdict = (f"Not worth it: at NZD {value:,.2f} per person-hour, option {cheaper}'s extra time costs more "
+                   f"than it saves (break-even NZD {break_even:,.2f}). Option {better} is the better deal.")
+
+    return TimeValueVerdict(
+        value_per_person_hour=value,
+        time_cost_a_nzd=time_cost_nzd(a, value, travellers),
+        time_cost_b_nzd=time_cost_nzd(b, value, travellers),
+        generalised_a_nzd=gen_a,
+        generalised_b_nzd=gen_b,
+        better=better,
+        break_even_value_per_person_hour=break_even,
+        verdict=verdict,
+    )
+
+
 @dataclass
 class Comparison:
     a: OptionSummary
@@ -158,6 +242,7 @@ class Comparison:
     savings_per_extra_hour_nzd: Decimal | None
     verdict: str
     break_even: BreakEven
+    time_value: TimeValueVerdict
     warnings: list[str] = field(default_factory=list)
 
     def per_person(self, value: Decimal) -> Decimal | None:
@@ -181,7 +266,9 @@ def _break_even(a: OptionSummary, b: OptionSummary) -> BreakEven:
     )
 
 
-def compare_options(a: OptionSummary, b: OptionSummary, travellers: int) -> Comparison:
+def compare_options(
+    a: OptionSummary, b: OptionSummary, travellers: int, time_value_nzd_per_hour: Decimal = Decimal("0")
+) -> Comparison:
     cost_diff = b.total_nzd - a.total_nzd
     time_diff = b.travel_hours - a.travel_hours
     cheaper = None if cost_diff == 0 else ("A" if cost_diff > 0 else "B")
@@ -222,6 +309,7 @@ def compare_options(a: OptionSummary, b: OptionSummary, travellers: int) -> Comp
         savings_per_extra_hour_nzd=savings_per_hour,
         verdict=verdict,
         break_even=_break_even(a, b),
+        time_value=_time_value(a, b, travellers, time_value_nzd_per_hour),
         warnings=warnings,
     )
 

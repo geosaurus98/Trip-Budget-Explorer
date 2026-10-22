@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from .models import Destination, Expense, RouteOption, TransportLeg, Trip, TripBundle
+from .models import CostSnapshot, Destination, Expense, RouteOption, TodoItem, TransportLeg, Trip, TripBundle
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "trips.db"
 
@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS trips (
     travellers INTEGER NOT NULL DEFAULT 1,
     budget_nzd TEXT NOT NULL DEFAULT '0',
     notes TEXT NOT NULL DEFAULT '',
-    is_demo INTEGER NOT NULL DEFAULT 0
+    is_demo INTEGER NOT NULL DEFAULT 0,
+    time_value_nzd_per_hour TEXT NOT NULL DEFAULT '0',
+    disruption_penalty_hours TEXT NOT NULL DEFAULT '0',
+    traveller_names TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS currency_rates (
     trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -83,8 +86,25 @@ CREATE TABLE IF NOT EXISTS legs (
     basis TEXT NOT NULL DEFAULT 'per_person',
     status TEXT NOT NULL DEFAULT 'estimated',
     notes TEXT NOT NULL DEFAULT '',
-    source_url TEXT NOT NULL DEFAULT ''
+    source_url TEXT NOT NULL DEFAULT '',
+    disruptive INTEGER NOT NULL DEFAULT 0,
+    book_by TEXT,
+    cancel_by TEXT,
+    paid_by TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS cost_history (
+    id INTEGER PRIMARY KEY,
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    record_type TEXT NOT NULL,
+    record_id INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    basis TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cost_history_record ON cost_history (record_type, record_id);
 CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY,
     trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -98,6 +118,17 @@ CREATE TABLE IF NOT EXISTS expenses (
     basis TEXT NOT NULL DEFAULT 'group',
     status TEXT NOT NULL DEFAULT 'estimated',
     nights_from_stop INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    book_by TEXT,
+    cancel_by TEXT,
+    paid_by TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY,
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    due TEXT,
+    done INTEGER NOT NULL DEFAULT 0,
     notes TEXT NOT NULL DEFAULT ''
 );
 """
@@ -105,10 +136,12 @@ CREATE TABLE IF NOT EXISTS expenses (
 LEG_FIELDS = (
     "trip_id", "option_id", "position", "origin", "destination", "mode", "depart_local", "arrive_local",
     "duration_hours", "base_fare", "extra_costs", "currency", "basis", "status", "notes", "source_url",
+    "disruptive", "book_by", "cancel_by", "paid_by",
 )
 EXPENSE_FIELDS = (
     "trip_id", "option_id", "destination_id", "description", "category", "unit_price", "quantity",
-    "currency", "basis", "status", "nights_from_stop", "notes",
+    "currency", "basis", "status", "nights_from_stop", "notes", "book_by", "cancel_by",
+    "paid_by",
 )
 DEST_FIELDS = ("trip_id", "position", "name", "country", "arrival", "departure", "latitude", "longitude", "notes")
 
@@ -119,6 +152,14 @@ def _date_out(value: date | None) -> str | None:
 
 def _date_in(value: str | None) -> date | None:
     return date.fromisoformat(value) if value else None
+
+
+def _names_out(names: list[str]) -> str:
+    return "\n".join(n.strip() for n in names if n.strip())
+
+
+def _names_in(value: str) -> list[str]:
+    return [n for n in (value or "").split("\n") if n]
 
 
 def _db_value(value):
@@ -137,6 +178,29 @@ class Repository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    # Columns added after the first release: (table, column, SQL definition).
+    # New databases get them from SCHEMA; older ones are upgraded in place.
+    MIGRATIONS = (
+        ("trips", "time_value_nzd_per_hour", "TEXT NOT NULL DEFAULT '0'"),
+        ("trips", "disruption_penalty_hours", "TEXT NOT NULL DEFAULT '0'"),
+        ("legs", "disruptive", "INTEGER NOT NULL DEFAULT 0"),
+        ("legs", "book_by", "TEXT"),
+        ("legs", "cancel_by", "TEXT"),
+        ("expenses", "book_by", "TEXT"),
+        ("expenses", "cancel_by", "TEXT"),
+        ("trips", "traveller_names", "TEXT NOT NULL DEFAULT ''"),
+        ("legs", "paid_by", "TEXT NOT NULL DEFAULT ''"),
+        ("expenses", "paid_by", "TEXT NOT NULL DEFAULT ''"),
+    )
+
+    @classmethod
+    def _migrate(cls, conn) -> None:
+        for table, column, definition in cls.MIGRATIONS:
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     # ------------------------------------------------------------------ plumbing
 
@@ -155,20 +219,87 @@ class Repository:
         finally:
             conn.close()
 
-    @staticmethod
-    def _insert(conn, table: str, fields: tuple[str, ...], obj) -> int:
+    def _insert(self, conn, table: str, fields: tuple[str, ...], obj) -> int:
         values = [_db_value(getattr(obj, f)) for f in fields]
         placeholders = ", ".join("?" for _ in fields)
         cur = conn.execute(f"INSERT INTO {table} ({', '.join(fields)}) VALUES ({placeholders})", values)
+        self._snapshot(conn, table, cur.lastrowid)
         return cur.lastrowid
 
-    @staticmethod
-    def _update(conn, table: str, fields: tuple[str, ...], obj) -> None:
+    def _update(self, conn, table: str, fields: tuple[str, ...], obj) -> None:
         if obj.id is None:
             raise ValueError("Cannot update a record without an id")
         assignments = ", ".join(f"{f} = ?" for f in fields)
         values = [_db_value(getattr(obj, f)) for f in fields] + [obj.id]
         conn.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", values)
+        self._snapshot(conn, table, obj.id)
+
+    # ------------------------------------------------------------------ cost history
+
+    _HISTORY_TYPES = {"legs": "leg", "expenses": "expense"}
+
+    def _snapshot(self, conn, table: str, record_id: int) -> None:
+        """Record a leg's/expense's cost fields if they differ from its latest snapshot.
+
+        Called on every insert/update, so all write paths (forms, apply, import,
+        demo) build history; edits to notes, names or dates add nothing.
+        """
+        record_type = self._HISTORY_TYPES.get(table)
+        if record_type is None:
+            return
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (record_id,)).fetchone()
+        if record_type == "leg":
+            amount, quantity = str(Decimal(row["base_fare"]) + Decimal(row["extra_costs"])), "1"
+        else:
+            amount, quantity = row["unit_price"], row["quantity"]
+            if row["nights_from_stop"] and row["destination_id"] is not None:
+                stop = conn.execute("SELECT arrival, departure FROM destinations WHERE id = ?",
+                                    (row["destination_id"],)).fetchone()
+                if stop and stop["arrival"] and stop["departure"]:
+                    nights = (_date_in(stop["departure"]) - _date_in(stop["arrival"])).days
+                    if nights >= 0:
+                        quantity = str(nights)  # the live quantity the cost calculation uses
+        current = (row["status"], amount, quantity, row["currency"], row["basis"])
+        latest = conn.execute(
+            "SELECT status, amount, quantity, currency, basis FROM cost_history"
+            " WHERE record_type = ? AND record_id = ? ORDER BY id DESC LIMIT 1",
+            (record_type, record_id),
+        ).fetchone()
+        if latest is not None and tuple(latest) == current:
+            return
+        conn.execute(
+            "INSERT INTO cost_history (trip_id, record_type, record_id, recorded_at, status, amount, quantity,"
+            " currency, basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["trip_id"], record_type, record_id, datetime.now().isoformat(timespec="seconds"), *current),
+        )
+
+    @staticmethod
+    def _row_to_snapshot(row) -> CostSnapshot:
+        return CostSnapshot(
+            record_type=row["record_type"], record_id=row["record_id"], recorded_at=row["recorded_at"],
+            status=row["status"], amount=Decimal(row["amount"]), quantity=Decimal(row["quantity"]),
+            currency=row["currency"], basis=row["basis"],
+        )
+
+    def cost_history(self, record_type: str, record_id: int) -> list[CostSnapshot]:
+        """Every recorded cost state of one leg or expense, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cost_history WHERE record_type = ? AND record_id = ? ORDER BY id",
+                (record_type, record_id),
+            ).fetchall()
+        return [self._row_to_snapshot(r) for r in rows]
+
+    def first_snapshots(self, trip_id: int) -> dict[tuple[str, int], CostSnapshot]:
+        """The earliest recorded cost state of each leg/expense in a trip."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT h.* FROM cost_history h JOIN ("
+                "  SELECT MIN(id) AS id FROM cost_history WHERE trip_id = ? GROUP BY record_type, record_id"
+                ") first ON first.id = h.id",
+                (trip_id,),
+            ).fetchall()
+        return {(r["record_type"], r["record_id"]): self._row_to_snapshot(r) for r in rows}
 
     # ------------------------------------------------------------------ meta
 
@@ -194,6 +325,9 @@ class Repository:
             budget_nzd=Decimal(row["budget_nzd"]),
             notes=row["notes"],
             is_demo=bool(row["is_demo"]),
+            time_value_nzd_per_hour=Decimal(row["time_value_nzd_per_hour"]),
+            disruption_penalty_hours=Decimal(row["disruption_penalty_hours"]),
+            traveller_names=_names_in(row["traveller_names"]),
             rates=rates,
         )
 
@@ -220,10 +354,12 @@ class Repository:
 
     def _insert_trip(self, conn, trip: Trip) -> int:
         cur = conn.execute(
-            "INSERT INTO trips (name, start_date, end_date, travellers, budget_nzd, notes, is_demo)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO trips (name, start_date, end_date, travellers, budget_nzd, notes, is_demo,"
+            " time_value_nzd_per_hour, disruption_penalty_hours, traveller_names)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (trip.name, _date_out(trip.start_date), _date_out(trip.end_date), trip.travellers,
-             str(trip.budget_nzd), trip.notes, int(trip.is_demo)),
+             str(trip.budget_nzd), trip.notes, int(trip.is_demo), str(trip.time_value_nzd_per_hour),
+             str(trip.disruption_penalty_hours), _names_out(trip.traveller_names)),
         )
         self._write_rates(conn, cur.lastrowid, trip.rates)
         return cur.lastrowid
@@ -235,10 +371,11 @@ class Repository:
     def update_trip(self, trip: Trip) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE trips SET name = ?, start_date = ?, end_date = ?, travellers = ?, budget_nzd = ?, notes = ?"
-                " WHERE id = ?",
+                "UPDATE trips SET name = ?, start_date = ?, end_date = ?, travellers = ?, budget_nzd = ?, notes = ?,"
+                " time_value_nzd_per_hour = ?, disruption_penalty_hours = ?, traveller_names = ? WHERE id = ?",
                 (trip.name, _date_out(trip.start_date), _date_out(trip.end_date), trip.travellers,
-                 str(trip.budget_nzd), trip.notes, trip.id),
+                 str(trip.budget_nzd), trip.notes, str(trip.time_value_nzd_per_hour),
+                 str(trip.disruption_penalty_hours), _names_out(trip.traveller_names), trip.id),
             )
             self._write_rates(conn, trip.id, trip.rates)
 
@@ -274,6 +411,11 @@ class Repository:
     def update_destination(self, dest: Destination) -> None:
         with self._connect() as conn:
             self._update(conn, "destinations", DEST_FIELDS, dest)
+            # Accommodation priced by this stop's nights changes cost when dates change.
+            for row in conn.execute(
+                "SELECT id FROM expenses WHERE destination_id = ? AND nights_from_stop = 1", (dest.id,)
+            ).fetchall():
+                self._snapshot(conn, "expenses", row["id"])
 
     def delete_destination(self, dest_id: int) -> None:
         with self._connect() as conn:
@@ -308,6 +450,8 @@ class Repository:
             duration_hours=Decimal(row["duration_hours"]), base_fare=Decimal(row["base_fare"]),
             extra_costs=Decimal(row["extra_costs"]), currency=row["currency"], basis=row["basis"],
             status=row["status"], notes=row["notes"], source_url=row["source_url"],
+            disruptive=bool(row["disruptive"]), book_by=_date_in(row["book_by"]),
+            cancel_by=_date_in(row["cancel_by"]), paid_by=row["paid_by"],
         )
 
     def list_legs(self, trip_id: int, option_id: int | None = None) -> list[TransportLeg]:
@@ -334,7 +478,17 @@ class Repository:
     def delete_leg(self, leg_id: int) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM legs WHERE id = ?", (leg_id,))
+            conn.execute("DELETE FROM cost_history WHERE record_type = 'leg' AND record_id = ?", (leg_id,))
             conn.execute("UPDATE route_options SET headline_leg_id = NULL WHERE headline_leg_id = ?", (leg_id,))
+
+    def set_leg_order(self, trip_id: int, ordered_ids: list[int], option_id: int | None = None) -> None:
+        """Rewrite positions for the given legs (active legs when option_id is None)."""
+        with self._connect() as conn:
+            current = {r["id"] for r in conn.execute(
+                "SELECT id FROM legs WHERE trip_id = ? AND option_id IS ?", (trip_id, option_id))}
+            if set(ordered_ids) != current:
+                raise ValueError("Leg order must list every leg exactly once")
+            conn.executemany("UPDATE legs SET position = ? WHERE id = ?", list(enumerate(ordered_ids)))
 
     def move_leg(self, leg_id: int, offset: int) -> None:
         with self._connect() as conn:
@@ -355,6 +509,7 @@ class Repository:
             description=row["description"], category=row["category"], unit_price=Decimal(row["unit_price"]),
             quantity=Decimal(row["quantity"]), currency=row["currency"], basis=row["basis"], status=row["status"],
             nights_from_stop=bool(row["nights_from_stop"]), notes=row["notes"],
+            book_by=_date_in(row["book_by"]), cancel_by=_date_in(row["cancel_by"]), paid_by=row["paid_by"],
         )
 
     def list_expenses(self, trip_id: int, option_id: int | None = None) -> list[Expense]:
@@ -377,6 +532,7 @@ class Repository:
     def delete_expense(self, expense_id: int) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+            conn.execute("DELETE FROM cost_history WHERE record_type = 'expense' AND record_id = ?", (expense_id,))
 
     # ------------------------------------------------------------------ route options
 
@@ -418,6 +574,15 @@ class Repository:
         """Deletes the option and its legs/expenses (never touches the active itinerary)."""
         with self._connect() as conn:
             conn.execute("DELETE FROM route_options WHERE id = ?", (option_id,))
+            self._prune_history(conn)
+
+    @staticmethod
+    def _prune_history(conn) -> None:
+        """Remove history of legs/expenses deleted by a cascade."""
+        conn.execute("DELETE FROM cost_history WHERE record_type = 'leg'"
+                     " AND record_id NOT IN (SELECT id FROM legs)")
+        conn.execute("DELETE FROM cost_history WHERE record_type = 'expense'"
+                     " AND record_id NOT IN (SELECT id FROM expenses)")
 
     def apply_option(self, option_id: int, replace_leg_ids: list[int], replace_expense_ids: list[int]) -> int:
         """Make an option part of the active itinerary, in one transaction.
@@ -482,6 +647,55 @@ class Repository:
             )
             return previous_id
 
+    # ------------------------------------------------------------------ checklist
+
+    @staticmethod
+    def _row_to_todo(row) -> TodoItem:
+        return TodoItem(id=row["id"], trip_id=row["trip_id"], title=row["title"], due=_date_in(row["due"]),
+                        done=bool(row["done"]), notes=row["notes"])
+
+    def list_todos(self, trip_id: int) -> list[TodoItem]:
+        """Open items first, then by due date (undated last)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM todos WHERE trip_id = ? ORDER BY done, due IS NULL, due, id", (trip_id,)
+            ).fetchall()
+        return [self._row_to_todo(r) for r in rows]
+
+    def _insert_todo(self, conn, todo: TodoItem) -> int:
+        cur = conn.execute("INSERT INTO todos (trip_id, title, due, done, notes) VALUES (?, ?, ?, ?, ?)",
+                           (todo.trip_id, todo.title, _date_out(todo.due), int(todo.done), todo.notes))
+        return cur.lastrowid
+
+    def save_todos(self, trip_id: int, todos: list[TodoItem]) -> None:
+        """Make the trip's checklist exactly ``todos``, in one transaction.
+
+        Items with an id are updated, items without one are added, and existing
+        items missing from the list are deleted.
+        """
+        with self._connect() as conn:
+            existing = {r["id"] for r in conn.execute("SELECT id FROM todos WHERE trip_id = ?", (trip_id,))}
+            keep = {t.id for t in todos if t.id is not None}
+            if keep - existing:
+                raise ValueError("Checklist contains items from another trip")
+            for todo_id in existing - keep:
+                conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+            for todo in todos:
+                if todo.id is None:
+                    self._insert_todo(conn, TodoItem(**{**todo.__dict__, "trip_id": trip_id}))
+                else:
+                    conn.execute("UPDATE todos SET title = ?, due = ?, done = ?, notes = ? WHERE id = ?",
+                                 (todo.title, _date_out(todo.due), int(todo.done), todo.notes, todo.id))
+
+    def add_missing_todos(self, trip_id: int, titles: list[str]) -> int:
+        """Add checklist items whose titles aren't already present (ignoring case). Returns how many."""
+        present = {t.title.strip().lower() for t in self.list_todos(trip_id)}
+        new = [t for t in titles if t.strip().lower() not in present]
+        with self._connect() as conn:
+            for title in new:
+                self._insert_todo(conn, TodoItem(trip_id=trip_id, title=title))
+        return len(new)
+
     # ------------------------------------------------------------------ bundles (import/export/seed)
 
     def load_bundle(self, trip_id: int) -> TripBundle:
@@ -500,7 +714,17 @@ class Repository:
             legs=legs,
             expenses=expenses,
             options=self.list_options(trip_id),
+            todos=self.list_todos(trip_id),
         )
+
+    def duplicate_trip(self, trip_id: int, new_name: str) -> int:
+        """Copy a whole trip (stops, legs, expenses, options) as a new, non-demo trip.
+
+        The copy starts with fresh cost history.
+        """
+        bundle = self.load_bundle(trip_id)
+        bundle.trip.name, bundle.trip.is_demo = new_name, False
+        return self.save_bundle(bundle)
 
     @staticmethod
     def _mapped(mapping: dict[int, int], local_id: int | None, kind: str) -> int | None:
@@ -544,6 +768,8 @@ class Repository:
                     "destination_id": self._mapped(dest_map, exp.destination_id, "destination"),
                 })
                 self._insert(conn, "expenses", EXPENSE_FIELDS, new)
+            for todo in bundle.todos:
+                self._insert_todo(conn, TodoItem(**{**todo.__dict__, "id": None, "trip_id": trip_id}))
             for opt in bundle.options:
                 if opt.id is not None and opt.headline_leg_id in leg_map:
                     conn.execute("UPDATE route_options SET headline_leg_id = ? WHERE id = ?",

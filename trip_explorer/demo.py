@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal as D
 
-from .models import Destination, Expense, RouteOption, TransportLeg, Trip, TripBundle
+from .models import Destination, Expense, RouteOption, TodoItem, TransportLeg, Trip, TripBundle
 from .storage import Repository
 
 DEMO_NAME = "DEMO (fictional): Indonesia to Singapore"
@@ -29,6 +29,10 @@ def build_demo_bundle() -> TripBundle:
         budget_nzd=D("6000"),
         # NZD per 1 unit of foreign currency (illustrative).
         rates={"IDR": D("0.000105"), "SGD": D("1.27")},
+        # Illustrative personal settings for the "is it worth it?" verdict.
+        time_value_nzd_per_hour=D("15"),
+        disruption_penalty_hours=D("2"),
+        traveller_names=["Alex", "Sam"],  # fictional
         notes=DEMO_NOTE,
         is_demo=True,
     )
@@ -54,11 +58,11 @@ def build_demo_bundle() -> TripBundle:
     dest_id = {d.name: d.id for d in destinations}
 
     def leg(lid, origin, dest, mode, hours, fare, extras, basis="per_person", currency="IDR", notes="", option=None,
-            depart="", arrive=""):
+            depart="", arrive="", disruptive=False):
         return TransportLeg(
             trip_id=None, id=lid, option_id=option, origin=origin, destination=dest, mode=mode,
             duration_hours=D(hours), base_fare=D(fare), extra_costs=D(extras), currency=currency, basis=basis,
-            status="estimated", notes=notes, depart_local=depart, arrive_local=arrive,
+            status="estimated", notes=notes, depart_local=depart, arrive_local=arrive, disruptive=disruptive,
         )
 
     legs = [
@@ -72,8 +76,9 @@ def build_demo_bundle() -> TripBundle:
         leg(5, "Yogyakarta", "Jakarta", "train", "7.5", "450000", "100000",
             notes="Extras = station transfers both ends.", depart="2027-06-13 08:00", arrive="2027-06-13 14:30"),
         leg(6, "Jakarta", "Medan", "flight", "5.5", "1100000", "400000",
-            notes="Extras = checked bag + airport transfers. 2.5 h flight, 5.5 h door to door.",
-            depart="2027-06-14 09:00", arrive="2027-06-14 11:30"),
+            notes="Extras = checked bag + airport transfers. 2.5 h flight, 5.5 h door to door. "
+                  "Early flight (3:30 am wake-up), so marked disruptive.",
+            depart="2027-06-14 06:00", arrive="2027-06-14 08:30", disruptive=True),
         leg(7, "Medan", "Bukit Lawang", "taxi/private transfer", "4", "700000", "0", basis="group"),
         leg(8, "Bukit Lawang", "Lake Toba (Tuk Tuk)", "taxi/private transfer", "7", "1200000", "60000",
             basis="group", notes="Car to Parapat + ferry to Tuk Tuk."),
@@ -106,7 +111,7 @@ def build_demo_bundle() -> TripBundle:
         expense(eid + 1, "Food – Indonesia daily allowance", "food", "250000", qty="20", basis="per_person",
                 notes="Per person per day × 20 days."),
         expense(eid + 2, "Food – Singapore daily allowance", "food", "60", qty="2", basis="per_person",
-                currency="SGD"),
+                currency="SGD", stop="Singapore"),
         expense(eid + 3, "Ijen crater tour", "activities", "450000", basis="per_person", stop="Banyuwangi / Ijen"),
         expense(eid + 4, "Bromo sunrise jeep", "activities", "1600000", stop="Bromo (Cemoro Lawang)"),
         expense(eid + 5, "Borobudur & Prambanan tickets", "activities", "700000", basis="per_person",
@@ -131,7 +136,8 @@ def build_demo_bundle() -> TripBundle:
         leg(102, "Yogyakarta", "Jakarta", "train", "7.5", "450000", "100000", option=2,
             notes="Extras = station transfers both ends."),
         leg(103, "Jakarta", "Medan", "flight", "5.5", "1100000", "400000", option=2,
-            notes="Extras = checked bag + airport transfers."),
+            notes="Extras = checked bag + airport transfers. Early flight (3:30 am wake-up).",
+            depart="2027-06-14 06:00", arrive="2027-06-14 08:30", disruptive=True),
     ]
     expenses += [
         expense(next_eid, "Extra hotel night – Jakarta", "accommodation", "700000", qty="1", option=2,
@@ -139,7 +145,45 @@ def build_demo_bundle() -> TripBundle:
         expense(next_eid + 1, "Extra day of meals – Jakarta", "food", "200000", basis="per_person", option=2),
     ]
 
-    return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options)
+    # Illustrative deadlines (see Overview → Deadlines).
+    for item in legs:
+        if (item.origin, item.destination) == ("Jakarta", "Medan") and item.option_id is None:
+            item.book_by = date(2027, 2, 1)
+        if item.destination == "Singapore":
+            item.cancel_by = date(2027, 5, 1)
+    for item in expenses:
+        if item.description == "2-day jungle trek":
+            item.book_by = date(2027, 5, 1)
+        elif item.description == "Hotel – Singapore":
+            item.book_by = date(2027, 4, 1)
+        elif item.description == "Hotel – Bali (Ubud)":
+            item.cancel_by = date(2027, 5, 25)
+
+    todos = [
+        TodoItem(trip_id=None, title="Buy travel insurance", due=date(2027, 3, 1)),
+        TodoItem(trip_id=None, title="Check visa / entry requirements for each country", due=date(2027, 4, 1)),
+        TodoItem(trip_id=None, title="Ask a travel doctor about recommended vaccinations", due=date(2027, 4, 15)),
+        TodoItem(trip_id=None, title="Book Bali accommodation", done=True),
+    ]
+
+    return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options,
+                      todos=todos)
+
+
+def _save_demo(repo: Repository) -> int:
+    """Save the demo, then record two illustrative bookings so cost history has something to show."""
+    trip_id = repo.save_bundle(build_demo_bundle())
+    for exp in repo.list_expenses(trip_id):
+        if exp.description == "Hotel – Bali (Ubud)":
+            exp.unit_price, exp.status, exp.paid_by = D("980000"), "booked", "Alex"
+            exp.notes += " Illustrative booking: came in above the first estimate."
+            repo.update_expense(exp)
+    for leg in repo.list_legs(trip_id):
+        if leg.destination == "Singapore":
+            leg.base_fare, leg.status, leg.paid_by = D("1750000"), "booked", "Sam"
+            leg.notes += " Illustrative booking: fare rose before booking."
+            repo.update_leg(leg)
+    return trip_id
 
 
 def demo_trip_ids(repo: Repository) -> list[int]:
@@ -153,7 +197,7 @@ def load_demo_trip(repo: Repository, replace_existing: bool = True) -> int:
         return existing[0]
     for trip_id in existing:
         repo.delete_trip(trip_id)
-    return repo.save_bundle(build_demo_bundle())
+    return _save_demo(repo)
 
 
 def ensure_first_setup(repo: Repository) -> bool:
@@ -166,7 +210,7 @@ def ensure_first_setup(repo: Repository) -> bool:
         return False
     seeded = False
     if not repo.list_trips():
-        repo.save_bundle(build_demo_bundle())
+        _save_demo(repo)
         seeded = True
     repo.set_meta(FIRST_SETUP_KEY, "1")
     return seeded
