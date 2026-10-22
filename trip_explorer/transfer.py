@@ -243,6 +243,8 @@ def parse_bundle(data: Any) -> TripBundle:
             notes=r.text(rec, "notes", where),
             source_url=r.text(rec, "source_url", where),
             disruptive=bool(rec.get("disruptive", False)),
+            book_by=r.date(rec, "book_by", where),
+            cancel_by=r.date(rec, "cancel_by", where),
         ))
 
     expenses = []
@@ -262,6 +264,8 @@ def parse_bundle(data: Any) -> TripBundle:
             status=r.choice(rec, "status", where, BOOKING_STATUSES, "estimated"),
             nights_from_stop=bool(rec.get("nights_from_stop", False)),
             notes=r.text(rec, "notes", where),
+            book_by=r.date(rec, "book_by", where),
+            cancel_by=r.date(rec, "cancel_by", where),
         ))
 
     # Cross-references. Currencies without a rate are allowed (drafts); the app

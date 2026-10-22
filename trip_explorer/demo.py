@@ -144,6 +144,20 @@ def build_demo_bundle() -> TripBundle:
         expense(next_eid + 1, "Extra day of meals – Jakarta", "food", "200000", basis="per_person", option=2),
     ]
 
+    # Illustrative deadlines (see Overview → Deadlines).
+    for item in legs:
+        if (item.origin, item.destination) == ("Jakarta", "Medan") and item.option_id is None:
+            item.book_by = date(2027, 2, 1)
+        if item.destination == "Singapore":
+            item.cancel_by = date(2027, 5, 1)
+    for item in expenses:
+        if item.description == "2-day jungle trek":
+            item.book_by = date(2027, 5, 1)
+        elif item.description == "Hotel – Singapore":
+            item.book_by = date(2027, 4, 1)
+        elif item.description == "Hotel – Bali (Ubud)":
+            item.cancel_by = date(2027, 5, 25)
+
     return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options)
 
 

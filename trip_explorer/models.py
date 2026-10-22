@@ -72,6 +72,9 @@ class TransportLeg:
     # Overnight, very early or otherwise disruptive travel. Adds the trip's
     # disruption penalty hours in time-value comparisons (not to raw hours).
     disruptive: bool = False
+    # Optional deadlines: book before this date / cancel free of charge until this date.
+    book_by: date | None = None
+    cancel_by: date | None = None
     position: int = 0
     # None means the leg is part of the active itinerary; otherwise it belongs
     # to a route option and is excluded from active totals.
@@ -94,6 +97,8 @@ class Expense:
     # is the stop's number of nights (recalculated live from its dates).
     nights_from_stop: bool = False
     notes: str = ""
+    book_by: date | None = None
+    cancel_by: date | None = None
     option_id: int | None = None
     id: int | None = None
 

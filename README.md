@@ -67,12 +67,14 @@ trip_explorer/
   scenarios.py               What-if price/exchange-rate scenarios and saving margins
   daily.py                   Spreading the budget over the trip's days
   history.py                 First estimate vs current cost (uses recorded cost history)
+  deadlines.py               Book-by and free-cancellation reminders
+  report.py                  Printable self-contained HTML trip summary
   storage.py                 SQLite Repository (all SQL lives here)
   transfer.py                JSON export/import with validation; CSV budget export
   demo.py                    Fictional demo trip and first-run seeding
   mapping.py                 Folium map builder
   ui/                        One module per screen + shared form helpers
-    overview.py itinerary.py budget.py compare.py settings.py common.py
+    overview.py itinerary.py budget.py compare.py trips.py settings.py common.py
 tests/                       pytest suite
 ```
 
@@ -164,6 +166,26 @@ changing a stop's dates records new snapshots for accommodation that takes its n
 - Both the first and current figures use today's exchange rates and traveller count, so the comparison shows
   price changes, not currency movements.
 - Items created before history tracking existed start their history at the next change.
+
+## Deadlines
+
+Legs and expenses can have two optional dates, and **Overview → Deadlines** lists the open ones, soonest first:
+
+- **Book by** is shown until the item is marked *booked*. Once the date has passed, it is marked overdue 🔴.
+- **Free cancellation until** is shown for *booked* items until the date passes, as a reminder of the last day you
+  can still change your mind without paying.
+
+Urgency markers: 🔴 overdue, 🟠 within 7 days, 🟡 within 30 days, ⚪ later.
+
+## Comparing whole trips
+
+**Compare trips** puts two or more saved trips side by side. It shows travellers, dates, nights, stops, total,
+per-traveller and **per-person-per-night** cost, budget left, transport time, how much is booked, and the cost of
+each category. A chart breaks down the cost per traveller. Each trip uses its own exchange rates and traveller
+count, and only the active itinerary counts.
+
+To try a variant of a trip, use **Settings → Duplicate this trip**. It copies stops, legs, expenses and route
+options; the copy's cost history starts fresh.
 
 ## Comparing route options
 
@@ -264,6 +286,11 @@ intermediate stops (e.g. the Jakarta hotel). This prevents double counting. Appl
 warns you first. Stops (destinations) are not changed, so remove a skipped stop on the Itinerary screen yourself.
 
 ## Import and export
+
+- **Trip summary (HTML)** is a single self-contained page to share with your travel companions. It
+  covers the key figures, itinerary, transport, budget by category and item, deadlines, route comparisons and
+  verdicts, plus notes on how the figures are calculated. It has no external files or scripts. Open it in any
+  browser and use *Print → Save as PDF* for a PDF.
 
 - **JSON export** contains the whole trip: settings, rates, stops, active legs and expenses, route options and their items.
 - **JSON import** validates the entire file first: format and version, required fields, numbers, dates,

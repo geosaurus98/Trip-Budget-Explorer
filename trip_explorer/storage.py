@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS legs (
     status TEXT NOT NULL DEFAULT 'estimated',
     notes TEXT NOT NULL DEFAULT '',
     source_url TEXT NOT NULL DEFAULT '',
-    disruptive INTEGER NOT NULL DEFAULT 0
+    disruptive INTEGER NOT NULL DEFAULT 0,
+    book_by TEXT,
+    cancel_by TEXT
 );
 CREATE TABLE IF NOT EXISTS cost_history (
     id INTEGER PRIMARY KEY,
@@ -114,18 +116,20 @@ CREATE TABLE IF NOT EXISTS expenses (
     basis TEXT NOT NULL DEFAULT 'group',
     status TEXT NOT NULL DEFAULT 'estimated',
     nights_from_stop INTEGER NOT NULL DEFAULT 0,
-    notes TEXT NOT NULL DEFAULT ''
+    notes TEXT NOT NULL DEFAULT '',
+    book_by TEXT,
+    cancel_by TEXT
 );
 """
 
 LEG_FIELDS = (
     "trip_id", "option_id", "position", "origin", "destination", "mode", "depart_local", "arrive_local",
     "duration_hours", "base_fare", "extra_costs", "currency", "basis", "status", "notes", "source_url",
-    "disruptive",
+    "disruptive", "book_by", "cancel_by",
 )
 EXPENSE_FIELDS = (
     "trip_id", "option_id", "destination_id", "description", "category", "unit_price", "quantity",
-    "currency", "basis", "status", "nights_from_stop", "notes",
+    "currency", "basis", "status", "nights_from_stop", "notes", "book_by", "cancel_by",
 )
 DEST_FIELDS = ("trip_id", "position", "name", "country", "arrival", "departure", "latitude", "longitude", "notes")
 
@@ -162,6 +166,10 @@ class Repository:
         ("trips", "time_value_nzd_per_hour", "TEXT NOT NULL DEFAULT '0'"),
         ("trips", "disruption_penalty_hours", "TEXT NOT NULL DEFAULT '0'"),
         ("legs", "disruptive", "INTEGER NOT NULL DEFAULT 0"),
+        ("legs", "book_by", "TEXT"),
+        ("legs", "cancel_by", "TEXT"),
+        ("expenses", "book_by", "TEXT"),
+        ("expenses", "cancel_by", "TEXT"),
     )
 
     @classmethod
@@ -417,7 +425,8 @@ class Repository:
             duration_hours=Decimal(row["duration_hours"]), base_fare=Decimal(row["base_fare"]),
             extra_costs=Decimal(row["extra_costs"]), currency=row["currency"], basis=row["basis"],
             status=row["status"], notes=row["notes"], source_url=row["source_url"],
-            disruptive=bool(row["disruptive"]),
+            disruptive=bool(row["disruptive"]), book_by=_date_in(row["book_by"]),
+            cancel_by=_date_in(row["cancel_by"]),
         )
 
     def list_legs(self, trip_id: int, option_id: int | None = None) -> list[TransportLeg]:
@@ -475,6 +484,7 @@ class Repository:
             description=row["description"], category=row["category"], unit_price=Decimal(row["unit_price"]),
             quantity=Decimal(row["quantity"]), currency=row["currency"], basis=row["basis"], status=row["status"],
             nights_from_stop=bool(row["nights_from_stop"]), notes=row["notes"],
+            book_by=_date_in(row["book_by"]), cancel_by=_date_in(row["cancel_by"]),
         )
 
     def list_expenses(self, trip_id: int, option_id: int | None = None) -> list[Expense]:
@@ -631,6 +641,15 @@ class Repository:
             expenses=expenses,
             options=self.list_options(trip_id),
         )
+
+    def duplicate_trip(self, trip_id: int, new_name: str) -> int:
+        """Copy a whole trip (stops, legs, expenses, options) as a new, non-demo trip.
+
+        The copy starts with fresh cost history.
+        """
+        bundle = self.load_bundle(trip_id)
+        bundle.trip.name, bundle.trip.is_demo = new_name, False
+        return self.save_bundle(bundle)
 
     @staticmethod
     def _mapped(mapping: dict[int, int], local_id: int | None, kind: str) -> int | None:

@@ -304,3 +304,34 @@ def summarize(
         transport_hours=sum((leg.duration_hours for leg in legs), Decimal("0")),
         lines=lines,
     )
+
+
+# --------------------------------------------------------------------------- whole-trip stats
+
+
+@dataclass
+class TripStats:
+    """Headline figures for comparing whole trips with each other."""
+
+    summary: BudgetSummary
+    stops: int
+    nights: int | None  # trip dates if set, else the sum of stop nights; None if unknown
+
+    @property
+    def per_person_per_night_nzd(self) -> Decimal | None:
+        if not self.nights or self.summary.travellers <= 0:
+            return None
+        return round_money(self.summary.total_nzd / (self.summary.travellers * self.nights))
+
+
+def trip_stats(
+    trip: Trip,
+    legs: list[TransportLeg],
+    expenses: list[Expense],
+    destinations: list[Destination],
+) -> TripStats:
+    nights = nights_between(trip.start_date, trip.end_date)
+    if nights is None:
+        stop_counts = [n for n in (stop_nights(d) for d in destinations) if n is not None]
+        nights = sum(stop_counts) if stop_counts else None
+    return TripStats(summary=summarize(trip, legs, expenses, destinations), stops=len(destinations), nights=nights)

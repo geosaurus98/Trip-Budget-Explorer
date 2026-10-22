@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
 from ..calculations import itinerary_issues, missing_connections, stop_nights, summarize
+from ..deadlines import upcoming_deadlines
 from ..mapping import build_route_map, mapped_stops
 from ..models import Destination, Trip
 from ..money import format_nzd
@@ -28,6 +31,26 @@ def itinerary_dataframe(destinations: list[Destination]) -> pd.DataFrame:
             "Notes": d.notes,
         })
     return pd.DataFrame(rows)
+
+
+URGENCY_ICON = {"overdue": "🔴", "this week": "🟠", "within 30 days": "🟡", "later": "⚪"}
+
+
+def _deadlines(legs, expenses) -> None:
+    st.subheader("Deadlines")
+    deadlines = upcoming_deadlines(legs, expenses, date.today())
+    if not deadlines:
+        st.caption("No open deadlines. Add 'Book by' or 'Free cancellation until' dates to legs and expenses.")
+        return
+    overdue = [d for d in deadlines if d.urgency == "overdue"]
+    if overdue:
+        st.error(f"{len(overdue)} item(s) are past their book-by date and not yet booked.")
+    st.dataframe(pd.DataFrame([{
+        "": URGENCY_ICON[d.urgency], "Due": d.due, "Deadline": d.label, "Item": d.description,
+        "Status": d.status,
+        "When": f"{-d.days_left} days ago" if d.days_left < 0 else ("today" if d.days_left == 0
+                                                                    else f"in {d.days_left} days"),
+    } for d in deadlines]), hide_index=True, width="stretch")
 
 
 def render(repo: Repository, trip: Trip) -> None:
@@ -98,6 +121,8 @@ def render(repo: Repository, trip: Trip) -> None:
                 column_config={"Group NZD": st.column_config.NumberColumn(format="%.2f")},
             )
         st.caption("Shows how much of the total is still an estimate versus researched or booked.")
+
+    _deadlines(legs, expenses)
 
     st.subheader("Itinerary")
     if destinations:
