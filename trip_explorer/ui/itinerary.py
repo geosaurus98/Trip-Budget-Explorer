@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ..calculations import itinerary_issues, stop_nights
-from ..models import Destination, Trip
+from ..calculations import (
+    itinerary_issues,
+    legs_in_stop_order,
+    missing_connections,
+    stop_nights,
+    unmatched_leg_places,
+)
+from ..models import Destination, TransportLeg, Trip
 from ..storage import Repository
 from .common import confirm_delete, flash, leg_form, legs_table, parse_coordinate, pick_record, saved
 from .overview import itinerary_dataframe
@@ -99,6 +105,44 @@ def _stops(repo: Repository, trip: Trip) -> None:
             saved(f"Deleted stop {dest.name}.")
 
 
+def _connection_checks(repo: Repository, trip: Trip, destinations: list[Destination],
+                       legs: list[TransportLeg]) -> None:
+    """Flag stops that no leg joins, and offer to create placeholder legs for them."""
+    missing = missing_connections(destinations, legs)
+    if missing:
+        st.warning(
+            f"{len(missing)} pair(s) of consecutive stops have no transport leg between them, so the trip total "
+            "may be missing travel costs: " + "; ".join(f"{a.name} → {b.name}" for a, b in missing)
+        )
+        if st.button(f"Create {len(missing)} placeholder leg(s)", key=f"placeholders_{trip.id}",
+                     help="Adds zero-cost 'estimated' legs in the right order for you to fill in."):
+            for a, b in missing:
+                repo.add_leg(TransportLeg(
+                    trip_id=trip.id, origin=a.name, destination=b.name, depart_local=_date_text(a.departure),
+                    notes="Placeholder created from stops — enter mode, duration and costs.",
+                ))
+            ordered = legs_in_stop_order(destinations, repo.list_legs(trip.id))
+            repo.set_leg_order(trip.id, [leg.id for leg in ordered])
+            saved(f"Created {len(missing)} placeholder leg(s).")
+    elif destinations and legs:
+        st.caption("✓ Every pair of consecutive stops is joined by at least one leg.")
+
+    unmatched = unmatched_leg_places(destinations, legs)
+    if unmatched:
+        st.caption("Leg places that don't match any stop name (fine for airports or stations, otherwise check for "
+                   "typos): " + ", ".join(unmatched))
+    ordered = legs_in_stop_order(destinations, legs)
+    if [leg.id for leg in ordered] != [leg.id for leg in legs]:
+        st.info("The legs are not in the same order as your stops.")
+        if st.button("Sort legs by stop order", key=f"sort_legs_{trip.id}"):
+            repo.set_leg_order(trip.id, [leg.id for leg in ordered])
+            saved("Sorted legs into stop order.")
+
+
+def _date_text(value) -> str:
+    return value.isoformat() if value else ""
+
+
 def _legs(repo: Repository, trip: Trip) -> None:
     legs = repo.list_legs(trip.id)
     destinations = repo.list_destinations(trip.id)
@@ -110,6 +154,7 @@ def _legs(repo: Repository, trip: Trip) -> None:
         st.dataframe(legs_table(legs, trip), hide_index=True, width="stretch")
     else:
         st.info("No transport legs yet — add one below.")
+    _connection_checks(repo, trip, destinations, legs)
 
     st.subheader("Add or edit a leg")
     positions = {leg.id: i for i, leg in enumerate(legs)}

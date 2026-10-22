@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS trips (
     travellers INTEGER NOT NULL DEFAULT 1,
     budget_nzd TEXT NOT NULL DEFAULT '0',
     notes TEXT NOT NULL DEFAULT '',
-    is_demo INTEGER NOT NULL DEFAULT 0
+    is_demo INTEGER NOT NULL DEFAULT 0,
+    time_value_nzd_per_hour TEXT NOT NULL DEFAULT '0',
+    disruption_penalty_hours TEXT NOT NULL DEFAULT '0'
 );
 CREATE TABLE IF NOT EXISTS currency_rates (
     trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -83,7 +85,8 @@ CREATE TABLE IF NOT EXISTS legs (
     basis TEXT NOT NULL DEFAULT 'per_person',
     status TEXT NOT NULL DEFAULT 'estimated',
     notes TEXT NOT NULL DEFAULT '',
-    source_url TEXT NOT NULL DEFAULT ''
+    source_url TEXT NOT NULL DEFAULT '',
+    disruptive INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY,
@@ -105,6 +108,7 @@ CREATE TABLE IF NOT EXISTS expenses (
 LEG_FIELDS = (
     "trip_id", "option_id", "position", "origin", "destination", "mode", "depart_local", "arrive_local",
     "duration_hours", "base_fare", "extra_costs", "currency", "basis", "status", "notes", "source_url",
+    "disruptive",
 )
 EXPENSE_FIELDS = (
     "trip_id", "option_id", "destination_id", "description", "category", "unit_price", "quantity",
@@ -137,6 +141,22 @@ class Repository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    # Columns added after the first release: (table, column, SQL definition).
+    # New databases get them from SCHEMA; older ones are upgraded in place.
+    MIGRATIONS = (
+        ("trips", "time_value_nzd_per_hour", "TEXT NOT NULL DEFAULT '0'"),
+        ("trips", "disruption_penalty_hours", "TEXT NOT NULL DEFAULT '0'"),
+        ("legs", "disruptive", "INTEGER NOT NULL DEFAULT 0"),
+    )
+
+    @classmethod
+    def _migrate(cls, conn) -> None:
+        for table, column, definition in cls.MIGRATIONS:
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     # ------------------------------------------------------------------ plumbing
 
@@ -194,6 +214,8 @@ class Repository:
             budget_nzd=Decimal(row["budget_nzd"]),
             notes=row["notes"],
             is_demo=bool(row["is_demo"]),
+            time_value_nzd_per_hour=Decimal(row["time_value_nzd_per_hour"]),
+            disruption_penalty_hours=Decimal(row["disruption_penalty_hours"]),
             rates=rates,
         )
 
@@ -220,10 +242,11 @@ class Repository:
 
     def _insert_trip(self, conn, trip: Trip) -> int:
         cur = conn.execute(
-            "INSERT INTO trips (name, start_date, end_date, travellers, budget_nzd, notes, is_demo)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO trips (name, start_date, end_date, travellers, budget_nzd, notes, is_demo,"
+            " time_value_nzd_per_hour, disruption_penalty_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (trip.name, _date_out(trip.start_date), _date_out(trip.end_date), trip.travellers,
-             str(trip.budget_nzd), trip.notes, int(trip.is_demo)),
+             str(trip.budget_nzd), trip.notes, int(trip.is_demo), str(trip.time_value_nzd_per_hour),
+             str(trip.disruption_penalty_hours)),
         )
         self._write_rates(conn, cur.lastrowid, trip.rates)
         return cur.lastrowid
@@ -235,10 +258,11 @@ class Repository:
     def update_trip(self, trip: Trip) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE trips SET name = ?, start_date = ?, end_date = ?, travellers = ?, budget_nzd = ?, notes = ?"
-                " WHERE id = ?",
+                "UPDATE trips SET name = ?, start_date = ?, end_date = ?, travellers = ?, budget_nzd = ?, notes = ?,"
+                " time_value_nzd_per_hour = ?, disruption_penalty_hours = ? WHERE id = ?",
                 (trip.name, _date_out(trip.start_date), _date_out(trip.end_date), trip.travellers,
-                 str(trip.budget_nzd), trip.notes, trip.id),
+                 str(trip.budget_nzd), trip.notes, str(trip.time_value_nzd_per_hour),
+                 str(trip.disruption_penalty_hours), trip.id),
             )
             self._write_rates(conn, trip.id, trip.rates)
 
@@ -308,6 +332,7 @@ class Repository:
             duration_hours=Decimal(row["duration_hours"]), base_fare=Decimal(row["base_fare"]),
             extra_costs=Decimal(row["extra_costs"]), currency=row["currency"], basis=row["basis"],
             status=row["status"], notes=row["notes"], source_url=row["source_url"],
+            disruptive=bool(row["disruptive"]),
         )
 
     def list_legs(self, trip_id: int, option_id: int | None = None) -> list[TransportLeg]:
@@ -335,6 +360,15 @@ class Repository:
         with self._connect() as conn:
             conn.execute("DELETE FROM legs WHERE id = ?", (leg_id,))
             conn.execute("UPDATE route_options SET headline_leg_id = NULL WHERE headline_leg_id = ?", (leg_id,))
+
+    def set_leg_order(self, trip_id: int, ordered_ids: list[int], option_id: int | None = None) -> None:
+        """Rewrite positions for the given legs (active legs when option_id is None)."""
+        with self._connect() as conn:
+            current = {r["id"] for r in conn.execute(
+                "SELECT id FROM legs WHERE trip_id = ? AND option_id IS ?", (trip_id, option_id))}
+            if set(ordered_ids) != current:
+                raise ValueError("Leg order must list every leg exactly once")
+            conn.executemany("UPDATE legs SET position = ? WHERE id = ?", list(enumerate(ordered_ids)))
 
     def move_leg(self, leg_id: int, offset: int) -> None:
         with self._connect() as conn:

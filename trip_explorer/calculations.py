@@ -88,6 +88,63 @@ def itinerary_issues(trip: Trip, destinations: list[Destination]) -> list[str]:
     return issues
 
 
+def _norm(place: str) -> str:
+    return (place or "").strip().lower()
+
+
+def missing_connections(
+    destinations: list[Destination], legs: list[TransportLeg]
+) -> list[tuple[Destination, Destination]]:
+    """Consecutive stops that no active transport leg (or chain of legs) joins.
+
+    A chain may pass through places that are not stops (e.g. "Kualanamu
+    airport"), but not through another stop. Place names match ignoring case
+    and surrounding spaces.
+    """
+    stop_names = {_norm(d.name) for d in destinations}
+    graph: dict[str, set[str]] = defaultdict(set)
+    for leg in legs:
+        graph[_norm(leg.origin)].add(_norm(leg.destination))
+
+    def reachable(start: str, goal: str) -> bool:
+        seen, frontier = {start}, [start]
+        while frontier:
+            for nxt in graph.get(frontier.pop(), ()):
+                if nxt == goal:
+                    return True
+                if nxt not in seen and nxt not in stop_names:
+                    seen.add(nxt)
+                    frontier.append(nxt)
+        return False
+
+    return [(a, b) for a, b in zip(destinations, destinations[1:]) if not reachable(_norm(a.name), _norm(b.name))]
+
+
+def legs_in_stop_order(destinations: list[Destination], legs: list[TransportLeg]) -> list[TransportLeg]:
+    """Stable sort of legs by the itinerary position of their origin stop.
+
+    A leg starting somewhere that isn't a stop (e.g. an airport) stays right
+    after the leg before it, so multi-leg chains are kept together.
+    """
+    index = {_norm(d.name): i for i, d in enumerate(destinations)}
+    keyed, last = [], -1
+    for pos, leg in enumerate(legs):
+        last = index.get(_norm(leg.origin), last)
+        keyed.append((last, pos, leg))
+    return [leg for _, _, leg in sorted(keyed, key=lambda t: (t[0], t[1]))]
+
+
+def unmatched_leg_places(destinations: list[Destination], legs: list[TransportLeg]) -> list[str]:
+    """Leg origins/destinations that don't match any stop name (often a typo)."""
+    stop_names = {_norm(d.name) for d in destinations}
+    seen: dict[str, str] = {}
+    for leg in legs:
+        for place in (leg.origin, leg.destination):
+            if _norm(place) not in stop_names:
+                seen.setdefault(_norm(place), place)
+    return list(seen.values())
+
+
 # --------------------------------------------------------------------------- costs
 
 

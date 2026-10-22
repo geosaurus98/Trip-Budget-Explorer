@@ -1,13 +1,20 @@
-"""Compare two route options and optionally apply one to the active itinerary."""
+"""Compare route options (all at once, then two in detail) and optionally apply one."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
-from ..comparison import Comparison, OptionSummary, compare_options, summarize_option
+from ..comparison import (
+    Comparison,
+    OptionSummary,
+    compare_options,
+    generalised_cost_nzd,
+    summarize_option,
+)
 from ..models import RouteOption, TransportLeg, Trip
 from ..money import format_nzd
 from ..storage import Repository
@@ -26,9 +33,10 @@ from .common import (
 def render(repo: Repository, trip: Trip) -> None:
     st.header("Compare routes")
     st.caption(
-        "Build two alternatives between the same start and end points — each with its own transport legs and "
-        "associated expenses (extra hotel nights, meals…). Options are **kept separate from the active itinerary "
-        "totals** until you explicitly apply one. All money is **whole-group NZD** unless marked per person."
+        "Build alternatives between the same start and end points — each with its own transport legs and "
+        "associated expenses (extra hotel nights, meals…). See every option side by side, then pick two to compare "
+        "in detail. Options are **kept separate from the active itinerary totals** until you explicitly apply one. "
+        "All money is **whole-group NZD** unless marked per person."
     )
 
     options = repo.list_options(trip.id)
@@ -41,6 +49,15 @@ def render(repo: Repository, trip: Trip) -> None:
 
     by_id = {o.id: o for o in options}
     ids = list(by_id)
+    destinations = repo.list_destinations(trip.id)
+    summaries = {
+        oid: summarize_option(trip, by_id[oid], repo.list_legs(trip.id, oid), repo.list_expenses(trip.id, oid),
+                              destinations)
+        for oid in ids
+    }
+    _all_options(list(summaries.values()), trip)
+
+    st.subheader("Compare two options in detail")
     c1, c2 = st.columns(2)
     a_id = c1.selectbox("Option A", ids, index=0, format_func=lambda i: by_id[i].name, key=f"cmp_a_{trip.id}")
     b_id = c2.selectbox("Option B", ids, index=1, format_func=lambda i: by_id[i].name, key=f"cmp_b_{trip.id}")
@@ -48,13 +65,7 @@ def render(repo: Repository, trip: Trip) -> None:
         st.warning("Choose two different options.")
         return
 
-    destinations = repo.list_destinations(trip.id)
-    summaries = {
-        oid: summarize_option(trip, by_id[oid], repo.list_legs(trip.id, oid), repo.list_expenses(trip.id, oid),
-                              destinations)
-        for oid in (a_id, b_id)
-    }
-    comparison = compare_options(summaries[a_id], summaries[b_id], trip.travellers)
+    comparison = compare_options(summaries[a_id], summaries[b_id], trip.travellers, trip.time_value_nzd_per_hour)
     _results(comparison, trip)
 
     st.divider()
@@ -70,6 +81,50 @@ def render(repo: Repository, trip: Trip) -> None:
 
 
 # --------------------------------------------------------------------------- results
+
+
+def _all_options(summaries: list[OptionSummary], trip: Trip) -> None:
+    st.subheader("All options")
+    value = trip.time_value_nzd_per_hour
+    rows = []
+    for s in summaries:
+        row = {
+            "Option": s.option.name,
+            "Route": f"{s.option.origin} → {s.option.destination}",
+            "Group NZD": float(s.total_nzd),
+            "Per person NZD": float(s.per_person_nzd or 0),
+            "Hours": float(s.travel_hours),
+            "Effective hours": float(s.effective_hours),
+            "Transfers": s.transfers,
+        }
+        if value > 0:
+            row["Cost incl. time NZD"] = float(generalised_cost_nzd(s, value, trip.travellers))
+        rows.append(row)
+    df = pd.DataFrame(rows).sort_values("Cost incl. time NZD" if value > 0 else "Group NZD")
+    money = st.column_config.NumberColumn(format="%.2f")
+    st.dataframe(df, hide_index=True, width="stretch",
+                 column_config={c: money for c in ("Group NZD", "Per person NZD", "Cost incl. time NZD")})
+    notes = ["Click a column header to sort.",
+             "Effective hours = door-to-door hours + disruption penalty for legs marked disruptive."]
+    if value > 0:
+        notes.append(f"Cost incl. time = group cost + NZD {value:,.2f} × {trip.travellers} traveller(s) × "
+                     "effective hours.")
+    else:
+        notes.append("Set a value for your time in Settings to rank options by cost including time.")
+    if df["Route"].nunique() > 1:
+        notes.append("⚠ Options cover different routes, so not every pair is like-for-like.")
+    st.caption(" ".join(notes))
+
+    points = alt.Chart(df).mark_circle(size=140).encode(
+        x=alt.X("Hours:Q", title="Door-to-door hours", scale=alt.Scale(zero=False, padding=60)),
+        y=alt.Y("Group NZD:Q", title="Total cost (group NZD)", scale=alt.Scale(zero=False, padding=40)),
+        color=alt.Color("Route:N"),
+        tooltip=["Option", "Route", alt.Tooltip("Group NZD:Q", format=",.2f"), "Hours", "Transfers"],
+    )
+    labels = points.mark_text(align="center", dy=-14, fontSize=11).encode(text="Option:N")
+    st.altair_chart((points + labels).properties(height=320), width="stretch")
+    st.caption("Lower-left is cheaper and faster. An option that is above and to the right of another is worse on "
+               "both counts.")
 
 
 def _results(c: Comparison, trip: Trip) -> None:
@@ -130,6 +185,25 @@ def _results(c: Comparison, trip: Trip) -> None:
             st.write(f"Not applicable — option {c.cheaper} is both cheaper and faster.")
     with c2:
         _break_even(c)
+    _time_value(c)
+
+
+def _time_value(c: Comparison) -> None:
+    tv = c.time_value
+    st.markdown("**Is it worth it for you?**")
+    not_worth_it = tv.break_even_value_per_person_hour is not None and tv.better not in (None, c.cheaper)
+    (st.warning if not_worth_it else st.info)(tv.verdict)
+    if tv.value_per_person_hour > 0:
+        st.dataframe(pd.DataFrame([
+            ("Effective hours (incl. disruption)", fmt_hours(c.a.effective_hours), fmt_hours(c.b.effective_hours)),
+            ("Disruptive legs", str(c.a.disruptive_legs), str(c.b.disruptive_legs)),
+            ("Total cost (group)", format_nzd(c.a.total_nzd), format_nzd(c.b.total_nzd)),
+            ("Value of time spent (group)", format_nzd(tv.time_cost_a_nzd), format_nzd(tv.time_cost_b_nzd)),
+            ("Cost incl. time (group)", format_nzd(tv.generalised_a_nzd), format_nzd(tv.generalised_b_nzd)),
+        ], columns=["", "Option A", "Option B"]), hide_index=True, width="stretch")
+    st.caption("Break-even time value = cost saving ÷ (extra effective hours × travellers), in NZD per "
+               "person-hour. Set your own time value and disruption penalty in Settings; mark overnight or very "
+               "early legs as disruptive in the leg form.")
 
 
 def _break_even(c: Comparison) -> None:

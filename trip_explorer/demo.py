@@ -29,6 +29,9 @@ def build_demo_bundle() -> TripBundle:
         budget_nzd=D("6000"),
         # NZD per 1 unit of foreign currency (illustrative).
         rates={"IDR": D("0.000105"), "SGD": D("1.27")},
+        # Illustrative personal settings for the "is it worth it?" verdict.
+        time_value_nzd_per_hour=D("15"),
+        disruption_penalty_hours=D("2"),
         notes=DEMO_NOTE,
         is_demo=True,
     )
@@ -54,11 +57,11 @@ def build_demo_bundle() -> TripBundle:
     dest_id = {d.name: d.id for d in destinations}
 
     def leg(lid, origin, dest, mode, hours, fare, extras, basis="per_person", currency="IDR", notes="", option=None,
-            depart="", arrive=""):
+            depart="", arrive="", disruptive=False):
         return TransportLeg(
             trip_id=None, id=lid, option_id=option, origin=origin, destination=dest, mode=mode,
             duration_hours=D(hours), base_fare=D(fare), extra_costs=D(extras), currency=currency, basis=basis,
-            status="estimated", notes=notes, depart_local=depart, arrive_local=arrive,
+            status="estimated", notes=notes, depart_local=depart, arrive_local=arrive, disruptive=disruptive,
         )
 
     legs = [
@@ -72,8 +75,9 @@ def build_demo_bundle() -> TripBundle:
         leg(5, "Yogyakarta", "Jakarta", "train", "7.5", "450000", "100000",
             notes="Extras = station transfers both ends.", depart="2027-06-13 08:00", arrive="2027-06-13 14:30"),
         leg(6, "Jakarta", "Medan", "flight", "5.5", "1100000", "400000",
-            notes="Extras = checked bag + airport transfers. 2.5 h flight, 5.5 h door to door.",
-            depart="2027-06-14 09:00", arrive="2027-06-14 11:30"),
+            notes="Extras = checked bag + airport transfers. 2.5 h flight, 5.5 h door to door. "
+                  "Early flight (3:30 am wake-up), so marked disruptive.",
+            depart="2027-06-14 06:00", arrive="2027-06-14 08:30", disruptive=True),
         leg(7, "Medan", "Bukit Lawang", "taxi/private transfer", "4", "700000", "0", basis="group"),
         leg(8, "Bukit Lawang", "Lake Toba (Tuk Tuk)", "taxi/private transfer", "7", "1200000", "60000",
             basis="group", notes="Car to Parapat + ferry to Tuk Tuk."),
@@ -131,7 +135,8 @@ def build_demo_bundle() -> TripBundle:
         leg(102, "Yogyakarta", "Jakarta", "train", "7.5", "450000", "100000", option=2,
             notes="Extras = station transfers both ends."),
         leg(103, "Jakarta", "Medan", "flight", "5.5", "1100000", "400000", option=2,
-            notes="Extras = checked bag + airport transfers."),
+            notes="Extras = checked bag + airport transfers. Early flight (3:30 am wake-up).",
+            depart="2027-06-14 06:00", arrive="2027-06-14 08:30", disruptive=True),
     ]
     expenses += [
         expense(next_eid, "Extra hotel night – Jakarta", "accommodation", "700000", qty="1", option=2,

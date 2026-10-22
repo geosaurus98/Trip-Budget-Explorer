@@ -29,6 +29,12 @@ class Trip:
     rates: dict[str, Decimal] = field(default_factory=dict)
     notes: str = ""
     is_demo: bool = False
+    # Personal trade-off settings for "is the cheaper route worth it?".
+    # How much one hour of one traveller's time is worth, in NZD (0 = not set).
+    time_value_nzd_per_hour: Decimal = Decimal("0")
+    # Extra hours of "disruption" added to a leg marked as disruptive
+    # (overnight, very early start, etc.) when weighing time against money.
+    disruption_penalty_hours: Decimal = Decimal("0")
     id: int | None = None
 
 
@@ -63,6 +69,9 @@ class TransportLeg:
     status: str = "estimated"
     notes: str = ""
     source_url: str = ""
+    # Overnight, very early or otherwise disruptive travel. Adds the trip's
+    # disruption penalty hours in time-value comparisons (not to raw hours).
+    disruptive: bool = False
     position: int = 0
     # None means the leg is part of the active itinerary; otherwise it belongs
     # to a route option and is excluded from active totals.

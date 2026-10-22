@@ -188,6 +188,9 @@ def parse_bundle(data: Any) -> TripBundle:
         rates=rates,
         notes=r.text(t, "notes", "trip"),
         is_demo=bool(t.get("is_demo", False)),
+        # Optional: files exported before these settings existed still import.
+        time_value_nzd_per_hour=r.decimal(t, "time_value_nzd_per_hour", "trip"),
+        disruption_penalty_hours=r.decimal(t, "disruption_penalty_hours", "trip"),
     )
 
     destinations = []
@@ -239,6 +242,7 @@ def parse_bundle(data: Any) -> TripBundle:
             status=r.choice(rec, "status", where, BOOKING_STATUSES, "estimated"),
             notes=r.text(rec, "notes", where),
             source_url=r.text(rec, "source_url", where),
+            disruptive=bool(rec.get("disruptive", False)),
         ))
 
     expenses = []

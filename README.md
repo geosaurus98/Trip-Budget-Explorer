@@ -126,13 +126,26 @@ times are free-text local reference times. No timezone maths is done.
 dates and missing coordinates. Arriving on the day the previous stop departs is *not* an overlap. The checks are
 warnings only, so you can still save unfinished drafts.
 
+**Leg checks.** On **Itinerary → Transport legs**, the app checks that every pair of consecutive stops is joined by
+a transport leg, or by a chain of legs through places that aren't stops (e.g. an airport). Place names match
+ignoring capitals and extra spaces. When a connection is missing:
+
+- It is flagged on the Itinerary screen and the Overview, because travel costs may be missing from the total.
+- **Create placeholder legs** adds zero-cost "estimated" legs, in the right order, for you to fill in.
+- **Sort legs by stop order** reorders legs to follow your stops. A chain of legs stays together.
+- Leg places that don't match any stop are listed, which helps catch typos.
+
 ## Comparing route options
 
 A **route option** is a named alternative between a start point and an end point. It holds its own transport legs
 and associated expenses, such as an extra hotel night or meals. Options are stored separately and **never count
 towards the active itinerary totals** until you apply one.
 
-For two options A and B, the Compare screen shows:
+**All options.** The top of the Compare screen lists every option side by side: group and per-person cost, hours,
+effective hours, transfers and (when set) cost including time. Click a column header to sort it. A chart plots
+cost against hours; lower-left is cheaper and faster.
+
+**Two options in detail.** For a chosen pair A and B, the Compare screen shows:
 
 | Measure | Definition |
 |---|---|
@@ -167,6 +180,32 @@ For example, in the demo Option B's flight from Jakarta saves NZD 252 (group) on
 extra Jakarta night and the extra meals cost NZD 210 more, which leaves NZD 42 of allowance. That works out to
 about NZD 6.46 saved per extra travel hour (6.5 h longer).
 
+### Is it worth it for you? (time value)
+
+Set two optional values under **Settings → Trip settings**:
+
+- **Value of one hour of one traveller's time** (NZD per person-hour).
+- **Disruption penalty** (hours) added for each leg you mark **disruptive**, such as overnight travel or a very
+  early start.
+
+The calculation, in group NZD:
+
+```
+effective hours  = door-to-door hours + penalty × number of disruptive legs
+time cost        = time value × travellers × effective hours
+cost incl. time  = total cost + time cost          → lower is the better deal for you
+break-even value = cost saving ÷ (extra effective hours × travellers)   (NZD per person-hour)
+```
+
+If one traveller-hour is worth less to you than the break-even value, the cheaper-but-slower option is worth it.
+Without a time value set, the app shows just the break-even value. If one option is cheaper without being slower,
+there is no trade-off, and it says so. Raw door-to-door hours and "savings per extra hour" never include the
+disruption penalty.
+
+For example, the demo sets NZD 15 per person-hour and a 2 h penalty for the 6 am Jakarta flight. Option B's NZD 42
+saving over 8.5 extra effective hours for 2 people gives a break-even of NZD 2.47 per person-hour, so the verdict
+is *not worth it*.
+
 ### Applying an option
 
 **Compare routes → Apply an option** does two things:
@@ -197,9 +236,11 @@ warns you first. Stops (destinations) are not changed, so remove a skipped stop 
   skipped.
 - There are no timezones: departure/arrival times are reference text only.
 - Each trip uses one fixed exchange rate per currency, with no historical or date-specific rates.
-- A comparison covers two options at a time, and stops are not updated when an option is applied.
-- Destinations and legs are separate lists. Legs are not automatically checked against the order of the stops
-  (route options are checked for gaps).
+- The detailed comparison covers two options at a time, though the overview table shows them all. Stops are not
+  updated when an option is applied.
+- Legs are matched to stops by place name, so a renamed stop needs its legs renamed too.
+- Time value is one number for everyone in the group. There is no separate weighting for transfers or comfort.
 - It is a single-user local app with no authentication, and it isn't designed for several people editing the
   same database at once.
-- There are no schema migrations yet. If a future version changes the tables, export your trips to JSON first.
+- Database upgrades are simple: new columns are added automatically when the app starts. There is no
+  framework for renaming or removing columns, so export your trips to JSON before any larger upgrade.

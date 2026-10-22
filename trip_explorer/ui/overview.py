@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-from ..calculations import itinerary_issues, stop_nights, summarize
+from ..calculations import itinerary_issues, missing_connections, stop_nights, summarize
 from ..mapping import build_route_map, mapped_stops
 from ..models import Destination, Trip
 from ..money import format_nzd
@@ -67,6 +67,8 @@ def render(repo: Repository, trip: Trip) -> None:
             "is missing: " + "; ".join(f"{l.description} ({l.problem})" for l in summary.unpriced_lines)
         )
     issues = itinerary_issues(trip, destinations)
+    issues += [f"No transport leg from {a.name} to {b.name} — travel costs may be missing."
+               for a, b in missing_connections(destinations, legs)]
     if issues:
         with st.expander(f"⚠ {len(issues)} itinerary check(s)", expanded=False):
             for issue in issues:

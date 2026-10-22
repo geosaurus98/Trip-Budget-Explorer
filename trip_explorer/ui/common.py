@@ -116,6 +116,7 @@ def legs_table(legs: list[TransportLeg], trip: Trip) -> pd.DataFrame:
             "Door-to-door h": float(leg.duration_hours),
             "Fare + extras": f"{leg.currency} {leg.base_fare:,.2f} + {leg.extra_costs:,.2f}",
             "Basis": BASIS_LABELS[leg.basis], "Group total (NZD)": total, "Status": leg.status,
+            "Disruptive": "yes" if leg.disruptive else "",
             "Depart (local)": leg.depart_local, "Arrive (local)": leg.arrive_local,
         })
     return pd.DataFrame(rows)
@@ -179,6 +180,11 @@ def leg_form(repo: Repository, trip: Trip, leg: TransportLeg | None, option_id: 
                          help="Per person: multiplied by the number of travellers. Whole group: used as-is.")
         status = c2.radio("Booking status", BOOKING_STATUSES, index=BOOKING_STATUSES.index(leg.status),
                           horizontal=True, key=f"{k}_s")
+        disruptive = st.checkbox(
+            "Disruptive (overnight, very early start, etc.)", value=leg.disruptive, key=f"{k}_dis",
+            help="Adds the trip's disruption penalty hours when weighing time against money on the Compare screen. "
+                 "Raw travel hours are not changed.",
+        )
         notes = st.text_area("Notes", leg.notes, height=68, key=f"{k}_n")
         url = st.text_input("Source URL (optional)", leg.source_url, key=f"{k}_u")
         submitted = st.form_submit_button("Add leg" if is_new else "Save leg", type="primary")
@@ -192,6 +198,7 @@ def leg_form(repo: Repository, trip: Trip, leg: TransportLeg | None, option_id: 
             origin=origin.strip(), destination=destination.strip(), mode=mode, depart_local=depart.strip(),
             arrive_local=arrive.strip(), duration_hours=to_decimal(duration), base_fare=base, extra_costs=extras,
             currency=currency, basis=basis, status=status, notes=notes, source_url=url.strip(),
+            disruptive=disruptive,
         )
         if is_new:
             repo.add_leg(updated)
