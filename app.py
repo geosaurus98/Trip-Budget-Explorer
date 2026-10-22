@@ -14,7 +14,7 @@ import streamlit as st
 from trip_explorer.demo import ensure_first_setup
 from trip_explorer.models import Trip
 from trip_explorer.storage import Repository, default_db_path
-from trip_explorer.ui import budget, compare, itinerary, overview, settings, trips
+from trip_explorer.ui import budget, checklist, compare, itinerary, overview, settings, trips
 from trip_explorer.ui.common import saved, select_trip, show_flash
 
 st.set_page_config(page_title="Trip Route & Budget Explorer", page_icon="🧭", layout="wide")
@@ -23,6 +23,7 @@ PAGES = {
     "Overview": overview.render,
     "Itinerary": itinerary.render,
     "Budget": budget.render,
+    "Checklist": checklist.render,
     "Compare routes": compare.render,
     "Compare trips": trips.render,
     "Settings & import/export": settings.render,

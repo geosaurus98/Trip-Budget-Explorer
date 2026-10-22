@@ -36,15 +36,16 @@ def itinerary_dataframe(destinations: list[Destination]) -> pd.DataFrame:
 URGENCY_ICON = {"overdue": "🔴", "this week": "🟠", "within 30 days": "🟡", "later": "⚪"}
 
 
-def _deadlines(legs, expenses) -> None:
+def _deadlines(legs, expenses, todos) -> None:
     st.subheader("Deadlines")
-    deadlines = upcoming_deadlines(legs, expenses, date.today())
+    deadlines = upcoming_deadlines(legs, expenses, date.today(), todos)
     if not deadlines:
-        st.caption("No open deadlines. Add 'Book by' or 'Free cancellation until' dates to legs and expenses.")
+        st.caption("No open deadlines. Add 'Book by' or 'Free cancellation until' dates to legs and expenses, "
+                   "or due dates to Checklist items.")
         return
     overdue = [d for d in deadlines if d.urgency == "overdue"]
     if overdue:
-        st.error(f"{len(overdue)} item(s) are past their book-by date and not yet booked.")
+        st.error(f"{len(overdue)} item(s) are overdue (not booked or not done by their date).")
     st.dataframe(pd.DataFrame([{
         "": URGENCY_ICON[d.urgency], "Due": d.due, "Deadline": d.label, "Item": d.description,
         "Status": d.status,
@@ -122,7 +123,7 @@ def render(repo: Repository, trip: Trip) -> None:
             )
         st.caption("Shows how much of the total is still an estimate versus researched or booked.")
 
-    _deadlines(legs, expenses)
+    _deadlines(legs, expenses, repo.list_todos(trip.id))
 
     st.subheader("Itinerary")
     if destinations:

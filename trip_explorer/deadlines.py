@@ -3,6 +3,7 @@
 * "Book by": shown until the item is marked booked; overdue once the date passes.
 * "Free cancellation until": shown for booked items until the date passes,
   as a reminder of the last day you can still change your mind for free.
+* Checklist items with a due date: shown until ticked off.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from .models import Expense, TransportLeg
+from .models import Expense, TodoItem, TransportLeg
 
 SOON_DAYS = 30
 WEEK_DAYS = 7
@@ -18,11 +19,11 @@ WEEK_DAYS = 7
 
 @dataclass
 class Deadline:
-    kind: str  # "book" or "cancel"
+    kind: str  # "book", "cancel" or "todo"
     due: date
     description: str
     status: str
-    record_type: str  # "leg" or "expense"
+    record_type: str  # "leg", "expense" or "todo"
     record_id: int | None
     days_left: int
 
@@ -38,10 +39,12 @@ class Deadline:
 
     @property
     def label(self) -> str:
-        return "Book by" if self.kind == "book" else "Free cancellation until"
+        return {"book": "Book by", "cancel": "Free cancellation until", "todo": "To do by"}[self.kind]
 
 
-def upcoming_deadlines(legs: list[TransportLeg], expenses: list[Expense], today: date) -> list[Deadline]:
+def upcoming_deadlines(
+    legs: list[TransportLeg], expenses: list[Expense], today: date, todos: list[TodoItem] = ()
+) -> list[Deadline]:
     """Open deadlines, soonest (or most overdue) first."""
     items = [("leg", leg.id, f"{leg.origin} → {leg.destination} ({leg.mode})", leg.status, leg.book_by,
               leg.cancel_by) for leg in legs]
@@ -55,4 +58,7 @@ def upcoming_deadlines(legs: list[TransportLeg], expenses: list[Expense], today:
         if cancel_by and status == "booked" and cancel_by >= today:
             found.append(Deadline("cancel", cancel_by, description, status, record_type, record_id,
                                   (cancel_by - today).days))
+    for todo in todos:
+        if todo.due and not todo.done:
+            found.append(Deadline("todo", todo.due, todo.title, "to do", "todo", todo.id, (todo.due - today).days))
     return sorted(found, key=lambda d: (d.due, d.kind, d.description))

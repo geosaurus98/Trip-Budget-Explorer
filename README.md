@@ -69,12 +69,14 @@ trip_explorer/
   history.py                 First estimate vs current cost (uses recorded cost history)
   deadlines.py               Book-by and free-cancellation reminders
   report.py                  Printable self-contained HTML trip summary
+  sharing.py                 Who paid / settle-up between travellers
+  geo.py                     Parsing pasted coordinates and map links (offline)
   storage.py                 SQLite Repository (all SQL lives here)
   transfer.py                JSON export/import with validation; CSV budget export
   demo.py                    Fictional demo trip and first-run seeding
   mapping.py                 Folium map builder
   ui/                        One module per screen + shared form helpers
-    overview.py itinerary.py budget.py compare.py trips.py settings.py common.py
+    overview.py itinerary.py budget.py checklist.py compare.py trips.py settings.py common.py
 tests/                       pytest suite
 ```
 
@@ -176,6 +178,32 @@ Legs and expenses can have two optional dates, and **Overview → Deadlines** li
   can still change your mind without paying.
 
 Urgency markers: 🔴 overdue, 🟠 within 7 days, 🟡 within 30 days, ⚪ later.
+
+## Checklist
+
+The **Checklist** screen is an editable list of things to do before you go. You can tick items off, edit cells,
+add rows at the bottom, or select rows and delete them. Changes are kept only when you press **Save checklist**.
+Items with a due date appear in **Overview → Deadlines** until they're ticked off.
+
+**Add common pre-trip items** adds generic reminders (passport and visa requirements, insurance, vaccinations,
+money, phone data, document copies, SafeTravel registration) that aren't already on the list. These are reminders
+only; check the actual requirements for your destinations and passport.
+
+## Who paid (sharing costs)
+
+1. Enter traveller names under **Settings → Trip settings**.
+2. Pick **Paid by** when editing a leg or expense.
+3. Open **Budget → Who paid**.
+
+**Budget → Who paid** shows each person's amount paid, fair share and balance, plus the payments needed to settle
+up (at most one fewer payment than there are people). The rules:
+
+- Everything marked as paid is shared **equally** between the named travellers. Each line is split in whole cents,
+  so balances always add up to zero.
+- Items with no payer are listed as not paid yet. Items paid by a name that's no longer in the list are flagged
+  and left out.
+- Amounts use the trip's current exchange rates. If you actually paid at a different rate, enter that rate before
+  settling.
 
 ## Comparing whole trips
 
@@ -302,6 +330,10 @@ warns you first. Stops (destinations) are not changed, so remove a skipped stop 
 ## Known limitations
 
 - Prices, durations and rates are manual. There are no live prices, geocoding, routing or booking.
+- There is no online geocoding. In the stop form you can type latitude and longitude, or paste coordinates or a
+  map link into one field. Accepted formats include `-8.5069, 115.2625`, `8.5069° S, 115.2625° E`, Google
+  Maps `…/@-8.5069,115.2625,14z` links and OpenStreetMap `?mlat=…&mlon=…` links.
+- Shared costs are always split equally; there are no custom splits yet.
 - The map draws **straight dashed lines in itinerary order**, not real roads or flight paths. It needs an
   internet connection to load the Leaflet library and OpenStreetMap tiles. Stops without coordinates are
   skipped.

@@ -156,6 +156,21 @@ def deadline_inputs(book_by, cancel_by, key: str):
     )
 
 
+NOT_PAID = ""
+
+
+def paid_by_input(trip: Trip, current: str, key: str) -> str:
+    """Who paid, from the trip's traveller names. Hidden until names are set in Settings."""
+    choices = [NOT_PAID, *trip.traveller_names]
+    if current and current not in choices:
+        choices.append(current)  # keep a payer whose name was since changed
+    if len(choices) == 1:
+        return current
+    return st.selectbox("Paid by (for sharing costs)", choices, index=choices.index(current), key=f"{key}_paid",
+                        format_func=lambda n: "— not paid yet / not recorded —" if n == NOT_PAID else n,
+                        help="Budget → Who paid shows who owes whom. Costs are shared equally.")
+
+
 def leg_form(repo: Repository, trip: Trip, leg: TransportLeg | None, option_id: int | None,
              key: str, default_origin: str = "", default_destination: str = "") -> None:
     is_new = leg is None
@@ -198,6 +213,7 @@ def leg_form(repo: Repository, trip: Trip, leg: TransportLeg | None, option_id: 
                  "Raw travel hours are not changed.",
         )
         book_by, cancel_by = deadline_inputs(leg.book_by, leg.cancel_by, k)
+        paid_by = paid_by_input(trip, leg.paid_by, k)
         notes = st.text_area("Notes", leg.notes, height=68, key=f"{k}_n")
         url = st.text_input("Source URL (optional)", leg.source_url, key=f"{k}_u")
         submitted = st.form_submit_button("Add leg" if is_new else "Save leg", type="primary")
@@ -211,7 +227,7 @@ def leg_form(repo: Repository, trip: Trip, leg: TransportLeg | None, option_id: 
             origin=origin.strip(), destination=destination.strip(), mode=mode, depart_local=depart.strip(),
             arrive_local=arrive.strip(), duration_hours=to_decimal(duration), base_fare=base, extra_costs=extras,
             currency=currency, basis=basis, status=status, notes=notes, source_url=url.strip(),
-            disruptive=disruptive, book_by=book_by, cancel_by=cancel_by,
+            disruptive=disruptive, book_by=book_by, cancel_by=cancel_by, paid_by=paid_by,
         )
         if is_new:
             repo.add_leg(updated)
@@ -265,6 +281,7 @@ def expense_form(repo: Repository, trip: Trip, expense: Expense | None, option_i
         status = c2.radio("Booking status", BOOKING_STATUSES, index=BOOKING_STATUSES.index(expense.status),
                           horizontal=True, key=f"{k}_status")
         book_by, cancel_by = deadline_inputs(expense.book_by, expense.cancel_by, k)
+        paid_by = paid_by_input(trip, expense.paid_by, k)
         notes = st.text_area("Notes", expense.notes, height=68, key=f"{k}_notes")
         submitted = st.form_submit_button("Add expense" if is_new else "Save expense", type="primary")
 
@@ -288,7 +305,7 @@ def expense_form(repo: Repository, trip: Trip, expense: Expense | None, option_i
             id=expense.id, trip_id=trip.id, option_id=expense.option_id, destination_id=destination_id,
             description=description.strip(), category=category, unit_price=price, quantity=qty,
             currency=currency, basis=basis, status=status, nights_from_stop=nights_from_stop, notes=notes,
-            book_by=book_by, cancel_by=cancel_by,
+            book_by=book_by, cancel_by=cancel_by, paid_by=paid_by,
         )
         if is_new:
             repo.add_expense(updated)

@@ -23,16 +23,7 @@ from decimal import Decimal
 
 from .calculations import cost_lines
 from .models import Destination, Expense, TransportLeg, Trip
-
-
-def split_evenly(amount: Decimal, parts: int) -> list[Decimal]:
-    """Split a cent amount into ``parts`` cent amounts that sum exactly to it."""
-    if parts <= 0:
-        raise ValueError("parts must be positive")
-    cents = int((amount * 100).to_integral_value())
-    sign = -1 if cents < 0 else 1
-    base, remainder = divmod(abs(cents), parts)
-    return [Decimal(sign * (base + (1 if i < remainder else 0))) / 100 for i in range(parts)]
+from .money import split_evenly
 
 
 def nights_of(arrival: date | None, departure: date | None) -> list[date]:

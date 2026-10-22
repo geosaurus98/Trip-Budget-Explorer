@@ -23,6 +23,7 @@ from .models import (
     Destination,
     Expense,
     RouteOption,
+    TodoItem,
     TransportLeg,
     Trip,
     TripBundle,
@@ -66,6 +67,7 @@ def bundle_to_dict(bundle: TripBundle) -> dict[str, Any]:
         "legs": [_record(l) for l in bundle.legs],
         "expenses": [_record(e) for e in bundle.expenses],
         "route_options": [_record(o) for o in bundle.options],
+        "todos": [_record(t) for t in bundle.todos],
     }
 
 
@@ -139,6 +141,13 @@ class _Reader:
             return None
         return value
 
+    def names(self, rec: dict, key: str, where: str) -> list[str]:
+        value = rec.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(n, str) for n in value):
+            self.errors.append(f"{where}: '{key}' must be a list of names")
+            return []
+        return [n.strip() for n in value if n.strip()]
+
     def records(self, data: dict, key: str) -> list[dict]:
         value = data.get(key, [])
         if not isinstance(value, list) or not all(isinstance(r, dict) for r in value):
@@ -191,6 +200,7 @@ def parse_bundle(data: Any) -> TripBundle:
         # Optional: files exported before these settings existed still import.
         time_value_nzd_per_hour=r.decimal(t, "time_value_nzd_per_hour", "trip"),
         disruption_penalty_hours=r.decimal(t, "disruption_penalty_hours", "trip"),
+        traveller_names=r.names(t, "traveller_names", "trip"),
     )
 
     destinations = []
@@ -245,6 +255,7 @@ def parse_bundle(data: Any) -> TripBundle:
             disruptive=bool(rec.get("disruptive", False)),
             book_by=r.date(rec, "book_by", where),
             cancel_by=r.date(rec, "cancel_by", where),
+            paid_by=r.text(rec, "paid_by", where),
         ))
 
     expenses = []
@@ -266,6 +277,18 @@ def parse_bundle(data: Any) -> TripBundle:
             notes=r.text(rec, "notes", where),
             book_by=r.date(rec, "book_by", where),
             cancel_by=r.date(rec, "cancel_by", where),
+            paid_by=r.text(rec, "paid_by", where),
+        ))
+
+    todos = []
+    for i, rec in enumerate(r.records(data, "todos"), start=1):
+        where = f"checklist item {i}"
+        todos.append(TodoItem(
+            trip_id=None,
+            title=r.text(rec, "title", where, required=True),
+            due=r.date(rec, "due", where),
+            done=bool(rec.get("done", False)),
+            notes=r.text(rec, "notes", where),
         ))
 
     # Cross-references. Currencies without a rate are allowed (drafts); the app
@@ -291,7 +314,8 @@ def parse_bundle(data: Any) -> TripBundle:
 
     if r.errors:
         raise ImportValidationError(r.errors)
-    return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options)
+    return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options,
+                      todos=todos)
 
 
 def parse_json(text: str | bytes) -> TripBundle:

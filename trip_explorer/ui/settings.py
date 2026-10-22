@@ -42,6 +42,10 @@ def _trip_settings(repo: Repository, trip: Trip) -> None:
         travellers = c3.number_input("Number of travellers", min_value=1, value=trip.travellers, step=1,
                                      key=f"{k}_trav")
         budget = money_input(st, "Budget for the whole group (NZD)", trip.budget_nzd, f"{k}_budget")
+        names_text = st.text_input(
+            "Traveller names (optional, comma-separated)", ", ".join(trip.traveller_names), key=f"{k}_names",
+            placeholder="Alex, Sam", help="Used to record who paid for each cost and to work out who owes whom.",
+        )
         st.markdown("**Is the cheaper route worth it?** Used on the Compare screen.")
         c1, c2 = st.columns(2)
         time_value = money_input(
@@ -64,6 +68,14 @@ def _trip_settings(repo: Repository, trip: Trip) -> None:
         trip.name, trip.start_date, trip.end_date = name.strip(), start, end
         trip.travellers, trip.budget_nzd, trip.notes = int(travellers), budget, notes
         trip.time_value_nzd_per_hour, trip.disruption_penalty_hours = time_value, to_decimal(penalty)
+        names = [n.strip() for n in names_text.split(",") if n.strip()]
+        if len({n.lower() for n in names}) != len(names):
+            st.error("Traveller names must be different from each other.")
+            return
+        trip.traveller_names = names
+        if names and len(names) != trip.travellers:
+            flash(f"You entered {len(names)} name(s) for {trip.travellers} traveller(s). Shared costs are split "
+                  "between the named people only.", "warning")
         repo.update_trip(trip)
         if start and end and end < start:
             flash("End date is before start date — saved anyway.", "warning")

@@ -35,6 +35,8 @@ class Trip:
     # Extra hours of "disruption" added to a leg marked as disruptive
     # (overnight, very early start, etc.) when weighing time against money.
     disruption_penalty_hours: Decimal = Decimal("0")
+    # Optional names, used to record who paid for what. Ideally one per traveller.
+    traveller_names: list[str] = field(default_factory=list)
     id: int | None = None
 
 
@@ -75,6 +77,7 @@ class TransportLeg:
     # Optional deadlines: book before this date / cancel free of charge until this date.
     book_by: date | None = None
     cancel_by: date | None = None
+    paid_by: str = ""  # traveller name; "" = not paid yet / not recorded
     position: int = 0
     # None means the leg is part of the active itinerary; otherwise it belongs
     # to a route option and is excluded from active totals.
@@ -99,6 +102,7 @@ class Expense:
     notes: str = ""
     book_by: date | None = None
     cancel_by: date | None = None
+    paid_by: str = ""
     option_id: int | None = None
     id: int | None = None
 
@@ -113,6 +117,18 @@ class RouteOption:
     # The leg whose base fare is the "headline" fare for break-even analysis.
     headline_leg_id: int | None = None
     applied_at: str = ""
+    id: int | None = None
+
+
+@dataclass
+class TodoItem:
+    """A trip checklist item (visa, insurance, vaccinations…)."""
+
+    trip_id: int | None
+    title: str
+    due: date | None = None
+    done: bool = False
+    notes: str = ""
     id: int | None = None
 
 
@@ -149,3 +165,4 @@ class TripBundle:
     legs: list[TransportLeg] = field(default_factory=list)
     expenses: list[Expense] = field(default_factory=list)
     options: list[RouteOption] = field(default_factory=list)
+    todos: list[TodoItem] = field(default_factory=list)

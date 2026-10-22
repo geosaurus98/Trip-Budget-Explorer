@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from .models import CostSnapshot, Destination, Expense, RouteOption, TransportLeg, Trip, TripBundle
+from .models import CostSnapshot, Destination, Expense, RouteOption, TodoItem, TransportLeg, Trip, TripBundle
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "trips.db"
 
@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS trips (
     notes TEXT NOT NULL DEFAULT '',
     is_demo INTEGER NOT NULL DEFAULT 0,
     time_value_nzd_per_hour TEXT NOT NULL DEFAULT '0',
-    disruption_penalty_hours TEXT NOT NULL DEFAULT '0'
+    disruption_penalty_hours TEXT NOT NULL DEFAULT '0',
+    traveller_names TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS currency_rates (
     trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -88,7 +89,8 @@ CREATE TABLE IF NOT EXISTS legs (
     source_url TEXT NOT NULL DEFAULT '',
     disruptive INTEGER NOT NULL DEFAULT 0,
     book_by TEXT,
-    cancel_by TEXT
+    cancel_by TEXT,
+    paid_by TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS cost_history (
     id INTEGER PRIMARY KEY,
@@ -118,18 +120,28 @@ CREATE TABLE IF NOT EXISTS expenses (
     nights_from_stop INTEGER NOT NULL DEFAULT 0,
     notes TEXT NOT NULL DEFAULT '',
     book_by TEXT,
-    cancel_by TEXT
+    cancel_by TEXT,
+    paid_by TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY,
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    due TEXT,
+    done INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT ''
 );
 """
 
 LEG_FIELDS = (
     "trip_id", "option_id", "position", "origin", "destination", "mode", "depart_local", "arrive_local",
     "duration_hours", "base_fare", "extra_costs", "currency", "basis", "status", "notes", "source_url",
-    "disruptive", "book_by", "cancel_by",
+    "disruptive", "book_by", "cancel_by", "paid_by",
 )
 EXPENSE_FIELDS = (
     "trip_id", "option_id", "destination_id", "description", "category", "unit_price", "quantity",
     "currency", "basis", "status", "nights_from_stop", "notes", "book_by", "cancel_by",
+    "paid_by",
 )
 DEST_FIELDS = ("trip_id", "position", "name", "country", "arrival", "departure", "latitude", "longitude", "notes")
 
@@ -140,6 +152,14 @@ def _date_out(value: date | None) -> str | None:
 
 def _date_in(value: str | None) -> date | None:
     return date.fromisoformat(value) if value else None
+
+
+def _names_out(names: list[str]) -> str:
+    return "\n".join(n.strip() for n in names if n.strip())
+
+
+def _names_in(value: str) -> list[str]:
+    return [n for n in (value or "").split("\n") if n]
 
 
 def _db_value(value):
@@ -170,6 +190,9 @@ class Repository:
         ("legs", "cancel_by", "TEXT"),
         ("expenses", "book_by", "TEXT"),
         ("expenses", "cancel_by", "TEXT"),
+        ("trips", "traveller_names", "TEXT NOT NULL DEFAULT ''"),
+        ("legs", "paid_by", "TEXT NOT NULL DEFAULT ''"),
+        ("expenses", "paid_by", "TEXT NOT NULL DEFAULT ''"),
     )
 
     @classmethod
@@ -304,6 +327,7 @@ class Repository:
             is_demo=bool(row["is_demo"]),
             time_value_nzd_per_hour=Decimal(row["time_value_nzd_per_hour"]),
             disruption_penalty_hours=Decimal(row["disruption_penalty_hours"]),
+            traveller_names=_names_in(row["traveller_names"]),
             rates=rates,
         )
 
@@ -331,10 +355,11 @@ class Repository:
     def _insert_trip(self, conn, trip: Trip) -> int:
         cur = conn.execute(
             "INSERT INTO trips (name, start_date, end_date, travellers, budget_nzd, notes, is_demo,"
-            " time_value_nzd_per_hour, disruption_penalty_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " time_value_nzd_per_hour, disruption_penalty_hours, traveller_names)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (trip.name, _date_out(trip.start_date), _date_out(trip.end_date), trip.travellers,
              str(trip.budget_nzd), trip.notes, int(trip.is_demo), str(trip.time_value_nzd_per_hour),
-             str(trip.disruption_penalty_hours)),
+             str(trip.disruption_penalty_hours), _names_out(trip.traveller_names)),
         )
         self._write_rates(conn, cur.lastrowid, trip.rates)
         return cur.lastrowid
@@ -347,10 +372,10 @@ class Repository:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE trips SET name = ?, start_date = ?, end_date = ?, travellers = ?, budget_nzd = ?, notes = ?,"
-                " time_value_nzd_per_hour = ?, disruption_penalty_hours = ? WHERE id = ?",
+                " time_value_nzd_per_hour = ?, disruption_penalty_hours = ?, traveller_names = ? WHERE id = ?",
                 (trip.name, _date_out(trip.start_date), _date_out(trip.end_date), trip.travellers,
                  str(trip.budget_nzd), trip.notes, str(trip.time_value_nzd_per_hour),
-                 str(trip.disruption_penalty_hours), trip.id),
+                 str(trip.disruption_penalty_hours), _names_out(trip.traveller_names), trip.id),
             )
             self._write_rates(conn, trip.id, trip.rates)
 
@@ -426,7 +451,7 @@ class Repository:
             extra_costs=Decimal(row["extra_costs"]), currency=row["currency"], basis=row["basis"],
             status=row["status"], notes=row["notes"], source_url=row["source_url"],
             disruptive=bool(row["disruptive"]), book_by=_date_in(row["book_by"]),
-            cancel_by=_date_in(row["cancel_by"]),
+            cancel_by=_date_in(row["cancel_by"]), paid_by=row["paid_by"],
         )
 
     def list_legs(self, trip_id: int, option_id: int | None = None) -> list[TransportLeg]:
@@ -484,7 +509,7 @@ class Repository:
             description=row["description"], category=row["category"], unit_price=Decimal(row["unit_price"]),
             quantity=Decimal(row["quantity"]), currency=row["currency"], basis=row["basis"], status=row["status"],
             nights_from_stop=bool(row["nights_from_stop"]), notes=row["notes"],
-            book_by=_date_in(row["book_by"]), cancel_by=_date_in(row["cancel_by"]),
+            book_by=_date_in(row["book_by"]), cancel_by=_date_in(row["cancel_by"]), paid_by=row["paid_by"],
         )
 
     def list_expenses(self, trip_id: int, option_id: int | None = None) -> list[Expense]:
@@ -622,6 +647,55 @@ class Repository:
             )
             return previous_id
 
+    # ------------------------------------------------------------------ checklist
+
+    @staticmethod
+    def _row_to_todo(row) -> TodoItem:
+        return TodoItem(id=row["id"], trip_id=row["trip_id"], title=row["title"], due=_date_in(row["due"]),
+                        done=bool(row["done"]), notes=row["notes"])
+
+    def list_todos(self, trip_id: int) -> list[TodoItem]:
+        """Open items first, then by due date (undated last)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM todos WHERE trip_id = ? ORDER BY done, due IS NULL, due, id", (trip_id,)
+            ).fetchall()
+        return [self._row_to_todo(r) for r in rows]
+
+    def _insert_todo(self, conn, todo: TodoItem) -> int:
+        cur = conn.execute("INSERT INTO todos (trip_id, title, due, done, notes) VALUES (?, ?, ?, ?, ?)",
+                           (todo.trip_id, todo.title, _date_out(todo.due), int(todo.done), todo.notes))
+        return cur.lastrowid
+
+    def save_todos(self, trip_id: int, todos: list[TodoItem]) -> None:
+        """Make the trip's checklist exactly ``todos``, in one transaction.
+
+        Items with an id are updated, items without one are added, and existing
+        items missing from the list are deleted.
+        """
+        with self._connect() as conn:
+            existing = {r["id"] for r in conn.execute("SELECT id FROM todos WHERE trip_id = ?", (trip_id,))}
+            keep = {t.id for t in todos if t.id is not None}
+            if keep - existing:
+                raise ValueError("Checklist contains items from another trip")
+            for todo_id in existing - keep:
+                conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
+            for todo in todos:
+                if todo.id is None:
+                    self._insert_todo(conn, TodoItem(**{**todo.__dict__, "trip_id": trip_id}))
+                else:
+                    conn.execute("UPDATE todos SET title = ?, due = ?, done = ?, notes = ? WHERE id = ?",
+                                 (todo.title, _date_out(todo.due), int(todo.done), todo.notes, todo.id))
+
+    def add_missing_todos(self, trip_id: int, titles: list[str]) -> int:
+        """Add checklist items whose titles aren't already present (ignoring case). Returns how many."""
+        present = {t.title.strip().lower() for t in self.list_todos(trip_id)}
+        new = [t for t in titles if t.strip().lower() not in present]
+        with self._connect() as conn:
+            for title in new:
+                self._insert_todo(conn, TodoItem(trip_id=trip_id, title=title))
+        return len(new)
+
     # ------------------------------------------------------------------ bundles (import/export/seed)
 
     def load_bundle(self, trip_id: int) -> TripBundle:
@@ -640,6 +714,7 @@ class Repository:
             legs=legs,
             expenses=expenses,
             options=self.list_options(trip_id),
+            todos=self.list_todos(trip_id),
         )
 
     def duplicate_trip(self, trip_id: int, new_name: str) -> int:
@@ -693,6 +768,8 @@ class Repository:
                     "destination_id": self._mapped(dest_map, exp.destination_id, "destination"),
                 })
                 self._insert(conn, "expenses", EXPENSE_FIELDS, new)
+            for todo in bundle.todos:
+                self._insert_todo(conn, TodoItem(**{**todo.__dict__, "id": None, "trip_id": trip_id}))
             for opt in bundle.options:
                 if opt.id is not None and opt.headline_leg_id in leg_map:
                     conn.execute("UPDATE route_options SET headline_leg_id = ? WHERE id = ?",

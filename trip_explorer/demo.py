@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal as D
 
-from .models import Destination, Expense, RouteOption, TransportLeg, Trip, TripBundle
+from .models import Destination, Expense, RouteOption, TodoItem, TransportLeg, Trip, TripBundle
 from .storage import Repository
 
 DEMO_NAME = "DEMO (fictional): Indonesia to Singapore"
@@ -32,6 +32,7 @@ def build_demo_bundle() -> TripBundle:
         # Illustrative personal settings for the "is it worth it?" verdict.
         time_value_nzd_per_hour=D("15"),
         disruption_penalty_hours=D("2"),
+        traveller_names=["Alex", "Sam"],  # fictional
         notes=DEMO_NOTE,
         is_demo=True,
     )
@@ -158,7 +159,15 @@ def build_demo_bundle() -> TripBundle:
         elif item.description == "Hotel – Bali (Ubud)":
             item.cancel_by = date(2027, 5, 25)
 
-    return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options)
+    todos = [
+        TodoItem(trip_id=None, title="Buy travel insurance", due=date(2027, 3, 1)),
+        TodoItem(trip_id=None, title="Check visa / entry requirements for each country", due=date(2027, 4, 1)),
+        TodoItem(trip_id=None, title="Ask a travel doctor about recommended vaccinations", due=date(2027, 4, 15)),
+        TodoItem(trip_id=None, title="Book Bali accommodation", done=True),
+    ]
+
+    return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options,
+                      todos=todos)
 
 
 def _save_demo(repo: Repository) -> int:
@@ -166,12 +175,12 @@ def _save_demo(repo: Repository) -> int:
     trip_id = repo.save_bundle(build_demo_bundle())
     for exp in repo.list_expenses(trip_id):
         if exp.description == "Hotel – Bali (Ubud)":
-            exp.unit_price, exp.status = D("980000"), "booked"
+            exp.unit_price, exp.status, exp.paid_by = D("980000"), "booked", "Alex"
             exp.notes += " Illustrative booking: came in above the first estimate."
             repo.update_expense(exp)
     for leg in repo.list_legs(trip_id):
         if leg.destination == "Singapore":
-            leg.base_fare, leg.status = D("1750000"), "booked"
+            leg.base_fare, leg.status, leg.paid_by = D("1750000"), "booked", "Sam"
             leg.notes += " Illustrative booking: fare rose before booking."
             repo.update_leg(leg)
     return trip_id

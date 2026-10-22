@@ -197,6 +197,8 @@ def test_json_round_trip_preserves_everything(repo):
             e.pop("id")
             e["option_id"] = opt_names.get(e["option_id"])
             e["destination_id"] = dest_names.get(e["destination_id"])
+        for t in data["todos"]:
+            t.pop("id")
         for o in data["route_options"]:
             o.pop("id")
             o["headline_leg_id"] = leg_names.get(o["headline_leg_id"])

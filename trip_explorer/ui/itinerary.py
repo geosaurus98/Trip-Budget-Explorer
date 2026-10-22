@@ -11,6 +11,7 @@ from ..calculations import (
     stop_nights,
     unmatched_leg_places,
 )
+from ..geo import parse_lat_lon
 from ..models import Destination, TransportLeg, Trip
 from ..storage import Repository
 from .common import confirm_delete, flash, leg_form, legs_table, parse_coordinate, pick_record, saved
@@ -71,6 +72,12 @@ def _stops(repo: Repository, trip: Trip) -> None:
                             placeholder="-8.5069", key=f"{k}_lat", help="Decimal degrees; south is negative.")
         lon = c2.text_input("Longitude (optional)", "" if dest.longitude is None else str(dest.longitude),
                             placeholder="115.2625", key=f"{k}_lon", help="Decimal degrees; west is negative.")
+        pasted = st.text_input(
+            "…or paste coordinates / a map link (fills in latitude and longitude)", key=f"{k}_paste",
+            placeholder="-8.5069, 115.2625   or   8.5069° S, 115.2625° E   or   https://…/@-8.5069,115.2625,14z",
+            help="In most map apps, long-press or right-click a place to copy its coordinates. Nothing is looked "
+                 "up online.",
+        )
         notes = st.text_area("Notes", dest.notes, height=68, key=f"{k}_notes")
         submitted = st.form_submit_button("Add stop" if is_new else "Save stop", type="primary")
 
@@ -79,8 +86,11 @@ def _stops(repo: Repository, trip: Trip) -> None:
             st.error("Please enter a place name.")
         else:
             try:
-                latitude = parse_coordinate(lat, 90, "Latitude")
-                longitude = parse_coordinate(lon, 180, "Longitude")
+                if pasted.strip():
+                    latitude, longitude = parse_lat_lon(pasted)
+                else:
+                    latitude = parse_coordinate(lat, 90, "Latitude")
+                    longitude = parse_coordinate(lon, 180, "Longitude")
             except ValueError as exc:
                 st.error(str(exc))
             else:

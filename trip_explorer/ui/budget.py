@@ -9,6 +9,7 @@ import streamlit as st
 from ..calculations import BudgetSummary, summarize
 from ..daily import daily_breakdown
 from ..history import accuracy_report
+from ..sharing import settle_up
 from ..models import Expense, Trip
 from ..money import format_nzd
 from ..storage import Repository
@@ -29,8 +30,10 @@ def render(repo: Repository, trip: Trip) -> None:
     c3.metric("Remaining (group)" if summary.remaining_nzd >= 0 else "Overspend (group)",
               format_nzd(abs(summary.remaining_nzd)))
 
-    expenses_tab, daily_tab, accuracy_tab, breakdown_tab = st.tabs(
-        ["Expenses", "By day", "Estimates vs current", "Full breakdown & CSV"])
+    expenses_tab, daily_tab, accuracy_tab, sharing_tab, breakdown_tab = st.tabs(
+        ["Expenses", "By day", "Estimates vs current", "Who paid", "Full breakdown & CSV"])
+    with sharing_tab:
+        _who_paid(trip, legs, expenses, destinations)
     with daily_tab:
         _by_day(trip, legs, expenses, destinations, summary)
     with accuracy_tab:
@@ -166,6 +169,43 @@ def _accuracy(repo: Repository, trip: Trip, legs, expenses, destinations) -> Non
         } for h in history]), hide_index=True, width="stretch")
     else:
         st.caption("No history recorded for this item yet (it was created before history tracking existed).")
+
+
+def _who_paid(trip: Trip, legs, expenses, destinations) -> None:
+    st.caption(
+        "Record who paid for each leg or expense (the **Paid by** field in its form). Everything paid is shared "
+        "**equally** between the named travellers; amounts use the trip's current exchange rates."
+    )
+    if not trip.traveller_names:
+        st.info("Add traveller names under **Settings → Trip settings** to start tracking who paid.")
+        return
+    result = settle_up(trip, legs, expenses, destinations)
+    if result.paid_total == 0:
+        st.info("Nothing is marked as paid yet. Choose **Paid by** when editing a leg or expense.")
+        return
+
+    st.dataframe(pd.DataFrame([{
+        "Traveller": b.name, "Paid NZD": float(b.paid), "Fair share NZD": float(b.share),
+        "Balance NZD": float(b.net),
+        "": "is owed" if b.net > 0 else ("owes" if b.net < 0 else "settled"),
+    } for b in result.balances]), hide_index=True, width="stretch",
+        column_config={c: st.column_config.NumberColumn(format="%.2f")
+                       for c in ("Paid NZD", "Fair share NZD", "Balance NZD")})
+
+    st.markdown("**To settle up**")
+    if result.transfers:
+        for t in result.transfers:
+            st.write(f"• **{t.payer}** pays **{t.payee}** {format_nzd(t.amount)}")
+    else:
+        st.write("Everyone is square.")
+    st.caption(f"Paid so far and shared equally: {format_nzd(result.paid_total)}.")
+    if result.unknown_payer:
+        st.warning("Paid by someone not in the traveller list (not included): "
+                   + "; ".join(f"{line.description} — {name}" for line, name in result.unknown_payer))
+    if result.not_paid:
+        with st.expander(f"{len(result.not_paid)} item(s) not marked as paid"):
+            for line in result.not_paid:
+                st.write(f"• {line.description}: {format_nzd(line.total_nzd)}")
 
 
 def _when(iso_timestamp: str) -> str:

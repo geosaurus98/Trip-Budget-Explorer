@@ -15,6 +15,7 @@ from .calculations import itinerary_issues, missing_connections, stop_nights, su
 from .comparison import compare_options, summarize_option
 from .deadlines import upcoming_deadlines
 from .models import TripBundle
+from .sharing import settle_up
 from .money import format_nzd
 
 BASIS = {"per_person": "per person", "group": "whole group"}
@@ -135,12 +136,37 @@ def trip_summary_html(bundle: TripBundle, today: date) -> str:
         ))
 
     # ---- deadlines
-    deadlines = upcoming_deadlines(legs, expenses, today)
+    deadlines = upcoming_deadlines(legs, expenses, today, bundle.todos)
     if deadlines:
         parts.append("<h2>Deadlines</h2>")
         parts.append(_table(["Due", "Deadline", "Item", "Status"],
                             [[_date(d.due) + (" (overdue)" if d.urgency == "overdue" else ""), d.label,
                               d.description, d.status] for d in deadlines]))
+
+    # ---- checklist
+    open_todos = [t for t in bundle.todos if not t.done]
+    if bundle.todos:
+        parts.append(f"<h2>Checklist</h2><p class=muted>{len(bundle.todos) - len(open_todos)} of "
+                     f"{len(bundle.todos)} done.</p>")
+        if open_todos:
+            parts.append("<ul>" + "".join(
+                f"<li>☐ {_e(t.title)}" + (f" <span class=muted>(by {_date(t.due)})</span>" if t.due else "")
+                + "</li>" for t in open_todos) + "</ul>")
+
+    # ---- who paid
+    if trip.traveller_names:
+        settlement = settle_up(trip, legs, expenses, dests)
+        if settlement.paid_total:
+            parts.append("<h2>Who paid</h2>")
+            parts.append(_table(
+                ["Traveller", "Paid", "Fair share", "Balance"],
+                [[b.name, format_nzd(b.paid), format_nzd(b.share), format_nzd(b.net, signed=True)]
+                 for b in settlement.balances],
+                numeric={1, 2, 3},
+            ))
+            transfers = "".join(f"<li>{_e(t.payer)} pays {_e(t.payee)} {_e(format_nzd(t.amount))}</li>"
+                                for t in settlement.transfers) or "<li>Everyone is square.</li>"
+            parts.append(f"<p><b>To settle up</b> (shared equally, current exchange rates):</p><ul>{transfers}</ul>")
 
     # ---- route comparisons: the first two options for each start/end pair
     by_route = defaultdict(list)

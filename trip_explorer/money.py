@@ -67,6 +67,16 @@ def convert_to_nzd(amount: Decimal, currency: str, rates: dict[str, Decimal]) ->
     return amount * rate_for(currency, rates)
 
 
+def split_evenly(amount: Decimal, parts: int) -> list[Decimal]:
+    """Split a cent amount into ``parts`` cent amounts that sum exactly to it."""
+    if parts <= 0:
+        raise ValueError("parts must be positive")
+    cents = int((amount * 100).to_integral_value())
+    sign = -1 if cents < 0 else 1
+    base, remainder = divmod(abs(cents), parts)
+    return [Decimal(sign * (base + (1 if i < remainder else 0))) / 100 for i in range(parts)]
+
+
 def format_nzd(value: Decimal | None, signed: bool = False) -> str:
     if value is None:
         return "—"
