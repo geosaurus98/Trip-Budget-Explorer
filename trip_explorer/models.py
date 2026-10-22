@@ -112,6 +112,24 @@ class RouteOption:
 
 
 @dataclass
+class CostSnapshot:
+    """A leg's or expense's cost fields as saved at one moment.
+
+    For legs, ``amount`` is base fare + additional costs and ``quantity`` is 1.
+    For expenses, ``amount`` is the unit price.
+    """
+
+    record_type: str  # "leg" or "expense"
+    record_id: int
+    recorded_at: str  # ISO timestamp, local time
+    status: str
+    amount: Decimal
+    quantity: Decimal
+    currency: str
+    basis: str
+
+
+@dataclass
 class TripBundle:
     """A whole trip with all its records, used for import/export and seeding.
 

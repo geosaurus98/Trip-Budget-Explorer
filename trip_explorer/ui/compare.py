@@ -17,6 +17,7 @@ from ..comparison import (
 )
 from ..models import RouteOption, TransportLeg, Trip
 from ..money import format_nzd
+from ..scenarios import saving_margin, with_price_change, with_rate_change
 from ..storage import Repository
 from .common import (
     confirm_delete,
@@ -67,6 +68,7 @@ def render(repo: Repository, trip: Trip) -> None:
 
     comparison = compare_options(summaries[a_id], summaries[b_id], trip.travellers, trip.time_value_nzd_per_hour)
     _results(comparison, trip)
+    _what_if(repo, trip, by_id[a_id], by_id[b_id], destinations, comparison)
 
     st.divider()
     st.subheader("Edit options")
@@ -252,6 +254,58 @@ def _break_even(c: Comparison) -> None:
             "- **Remaining allowance** = initial allowance − extra costs = total of other option − total of "
             "cheaper-fare option. If negative, the excess is shown instead."
         )
+
+
+# --------------------------------------------------------------------------- what if
+
+
+def _what_if(repo: Repository, trip: Trip, a: RouteOption, b: RouteOption, destinations, base: Comparison) -> None:
+    st.markdown("**What if prices change?**")
+    margin = saving_margin(base)
+    if margin is not None:
+        other = "B" if margin.cheaper == "A" else "A"
+        rise = ("any amount" if margin.cheaper_rise_pct is None else f"more than **{margin.cheaper_rise_pct}%**")
+        st.write(f"Option {margin.cheaper} stays cheaper unless its costs rise by {rise}, or option {other}'s costs "
+                 f"fall by more than **{margin.other_fall_pct}%**.")
+        if margin.cheaper_rise_pct is not None and margin.cheaper_rise_pct < 10:
+            st.caption("⚠ That's a thin margin for prices that are still estimates.")
+
+    with st.expander("Try a scenario (nothing is saved)"):
+        c1, c2, c3 = st.columns(3)
+        fx = c1.slider("Foreign exchange rates", -30, 30, 0, 5, format="%d%%", key=f"wi_fx_{trip.id}",
+                       help="+10% = every foreign currency costs 10% more NZD. NZD-priced items don't change.")
+        pa = c2.slider("Option A prices", -50, 50, 0, 5, format="%d%%", key=f"wi_a_{trip.id}",
+                       help="Moves every fare, additional cost and expense price in option A.")
+        pb = c3.slider("Option B prices", -50, 50, 0, 5, format="%d%%", key=f"wi_b_{trip.id}")
+
+        scenario_trip = with_rate_change(trip, Decimal(fx))
+        summaries = []
+        for option, pct in ((a, pa), (b, pb)):
+            legs, expenses = with_price_change(repo.list_legs(trip.id, option.id),
+                                               repo.list_expenses(trip.id, option.id), Decimal(pct))
+            summaries.append(summarize_option(scenario_trip, option, legs, expenses, destinations))
+        scenario = compare_options(*summaries, trip.travellers, trip.time_value_nzd_per_hour)
+
+        def remaining(c: Comparison) -> str:
+            be = c.break_even
+            if be.cheap_fare_label is None:
+                return "—"
+            if be.saving_survives:
+                return f"{format_nzd(be.remaining_allowance_nzd)} left (option {be.cheap_fare_label})"
+            return f"{format_nzd(be.excess_nzd)} over (option {be.cheap_fare_label})"
+
+        st.dataframe(pd.DataFrame([
+            ("Option A total (group)", format_nzd(base.a.total_nzd), format_nzd(scenario.a.total_nzd)),
+            ("Option B total (group)", format_nzd(base.b.total_nzd), format_nzd(scenario.b.total_nzd)),
+            ("Difference (B − A)", format_nzd(base.cost_difference_nzd, True),
+             format_nzd(scenario.cost_difference_nzd, True)),
+            ("Cheaper option", base.cheaper or "equal", scenario.cheaper or "equal"),
+            ("Break-even allowance", remaining(base), remaining(scenario)),
+            ("Better incl. your time", base.time_value.better or "—", scenario.time_value.better or "—"),
+        ], columns=["", "Now", "Scenario"]), hide_index=True, width="stretch")
+        st.info(scenario.verdict)
+        if trip.time_value_nzd_per_hour > 0:
+            st.caption(scenario.time_value.verdict)
 
 
 # --------------------------------------------------------------------------- editing

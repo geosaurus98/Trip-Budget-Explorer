@@ -62,8 +62,11 @@ app.py                       Streamlit entry point: sidebar, navigation only
 trip_explorer/
   models.py                  Dataclasses (Trip, Destination, TransportLeg, Expense, RouteOption, TripBundle)
   money.py                   Decimal parsing, rounding, currency conversion
-  calculations.py            Nights, cost lines, budget summary, itinerary checks
-  comparison.py              Route option summaries, comparison and break-even
+  calculations.py            Nights, cost lines, budget summary, itinerary and leg checks
+  comparison.py              Route option summaries, comparison, break-even and time value
+  scenarios.py               What-if price/exchange-rate scenarios and saving margins
+  daily.py                   Spreading the budget over the trip's days
+  history.py                 First estimate vs current cost (uses recorded cost history)
   storage.py                 SQLite Repository (all SQL lives here)
   transfer.py                JSON export/import with validation; CSV budget export
   demo.py                    Fictional demo trip and first-run seeding
@@ -134,6 +137,33 @@ ignoring capitals and extra spaces. When a connection is missing:
 - **Create placeholder legs** adds zero-cost "estimated" legs, in the right order, for you to fill in.
 - **Sort legs by stop order** reorders legs to follow your stops. A chain of legs stays together.
 - Leg places that don't match any stop are listed, which helps catch typos.
+
+## Budget views
+
+**By day** spreads the active budget over the trip's dates and shows a stacked chart, a running total, and
+how much budget is left each day. All amounts are whole-group NZD. The allocation rules are:
+
+- **Accommodation:** split evenly over the linked stop's nights.
+- **Food:** split over the linked stop's nights. Food that isn't linked to a stop is split over every night of the
+  trip, which needs trip dates.
+- **Transport:** placed on the date in *Departure (local)* when it starts with `YYYY-MM-DD`. Otherwise it goes on the
+  departure date of the stop the leg leaves from.
+- **Activities and misc** linked to a stop: placed on the stop's arrival date.
+- **Everything else** (e.g. travel insurance) is listed as *not tied to a date*. It counts in the running total
+  from day one.
+
+Splits are done in whole cents, so the days plus the undated amount always add up exactly to the budget total.
+
+**Estimates vs current.** A snapshot is saved automatically whenever a leg's or expense's price, quantity,
+currency, basis or booking status changes. Edits to notes, names or dates don't create snapshots, except that
+changing a stop's dates records new snapshots for accommodation that takes its nights from that stop.
+
+- The tab compares each item's *first recorded* cost with its cost now, and you can view any item's full history.
+- It also shows how far your **booked** items moved from their first estimates.
+- It then projects what happens if everything **not yet booked** drifts by the same percentage.
+- Both the first and current figures use today's exchange rates and traveller count, so the comparison shows
+  price changes, not currency movements.
+- Items created before history tracking existed start their history at the next change.
 
 ## Comparing route options
 
@@ -206,6 +236,20 @@ For example, the demo sets NZD 15 per person-hour and a 2 h penalty for the 6 am
 saving over 8.5 extra effective hours for 2 people gives a break-even of NZD 2.47 per person-hour, so the verdict
 is *not worth it*.
 
+### What if prices change?
+
+Below the detailed comparison, the app shows how robust the saving is. It says how much the cheaper option's
+costs can rise, or the other option's costs can fall, before the cheaper option stops being cheaper:
+
+```
+cheaper option may rise by = saving ÷ cheaper total × 100%
+other option may fall by   = saving ÷ other total × 100%
+```
+
+The scenario sliders move every foreign exchange rate, and option A's or B's prices (fares, additional costs and
+expense prices), by a percentage. The cost, break-even and time-value results are then recalculated
+side by side with the current figures. Scenarios never change saved data.
+
 ### Applying an option
 
 **Compare routes → Apply an option** does two things:
@@ -239,6 +283,8 @@ warns you first. Stops (destinations) are not changed, so remove a skipped stop 
 - The detailed comparison covers two options at a time, though the overview table shows them all. Stops are not
   updated when an option is applied.
 - Legs are matched to stops by place name, so a renamed stop needs its legs renamed too.
+- Cost history is not included in JSON exports, so an imported trip starts with fresh history.
+- The what-if sliders apply one percentage to all of an option's prices. To test a single fare, edit it directly.
 - Time value is one number for everyone in the group. There is no separate weighting for transfers or comfort.
 - It is a single-user local app with no authentication, and it isn't designed for several people editing the
   same database at once.

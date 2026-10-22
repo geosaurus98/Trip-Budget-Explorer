@@ -110,7 +110,7 @@ def build_demo_bundle() -> TripBundle:
         expense(eid + 1, "Food – Indonesia daily allowance", "food", "250000", qty="20", basis="per_person",
                 notes="Per person per day × 20 days."),
         expense(eid + 2, "Food – Singapore daily allowance", "food", "60", qty="2", basis="per_person",
-                currency="SGD"),
+                currency="SGD", stop="Singapore"),
         expense(eid + 3, "Ijen crater tour", "activities", "450000", basis="per_person", stop="Banyuwangi / Ijen"),
         expense(eid + 4, "Bromo sunrise jeep", "activities", "1600000", stop="Bromo (Cemoro Lawang)"),
         expense(eid + 5, "Borobudur & Prambanan tickets", "activities", "700000", basis="per_person",
@@ -147,6 +147,22 @@ def build_demo_bundle() -> TripBundle:
     return TripBundle(trip=trip, destinations=destinations, legs=legs, expenses=expenses, options=options)
 
 
+def _save_demo(repo: Repository) -> int:
+    """Save the demo, then record two illustrative bookings so cost history has something to show."""
+    trip_id = repo.save_bundle(build_demo_bundle())
+    for exp in repo.list_expenses(trip_id):
+        if exp.description == "Hotel – Bali (Ubud)":
+            exp.unit_price, exp.status = D("980000"), "booked"
+            exp.notes += " Illustrative booking: came in above the first estimate."
+            repo.update_expense(exp)
+    for leg in repo.list_legs(trip_id):
+        if leg.destination == "Singapore":
+            leg.base_fare, leg.status = D("1750000"), "booked"
+            leg.notes += " Illustrative booking: fare rose before booking."
+            repo.update_leg(leg)
+    return trip_id
+
+
 def demo_trip_ids(repo: Repository) -> list[int]:
     return [t.id for t in repo.list_trips() if t.is_demo]
 
@@ -158,7 +174,7 @@ def load_demo_trip(repo: Repository, replace_existing: bool = True) -> int:
         return existing[0]
     for trip_id in existing:
         repo.delete_trip(trip_id)
-    return repo.save_bundle(build_demo_bundle())
+    return _save_demo(repo)
 
 
 def ensure_first_setup(repo: Repository) -> bool:
@@ -171,7 +187,7 @@ def ensure_first_setup(repo: Repository) -> bool:
         return False
     seeded = False
     if not repo.list_trips():
-        repo.save_bundle(build_demo_bundle())
+        _save_demo(repo)
         seeded = True
     repo.set_meta(FIRST_SETUP_KEY, "1")
     return seeded

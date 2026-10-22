@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from .models import Destination, Expense, RouteOption, TransportLeg, Trip, TripBundle
+from .models import CostSnapshot, Destination, Expense, RouteOption, TransportLeg, Trip, TripBundle
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "trips.db"
 
@@ -88,6 +88,19 @@ CREATE TABLE IF NOT EXISTS legs (
     source_url TEXT NOT NULL DEFAULT '',
     disruptive INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS cost_history (
+    id INTEGER PRIMARY KEY,
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    record_type TEXT NOT NULL,
+    record_id INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    basis TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cost_history_record ON cost_history (record_type, record_id);
 CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY,
     trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -175,20 +188,87 @@ class Repository:
         finally:
             conn.close()
 
-    @staticmethod
-    def _insert(conn, table: str, fields: tuple[str, ...], obj) -> int:
+    def _insert(self, conn, table: str, fields: tuple[str, ...], obj) -> int:
         values = [_db_value(getattr(obj, f)) for f in fields]
         placeholders = ", ".join("?" for _ in fields)
         cur = conn.execute(f"INSERT INTO {table} ({', '.join(fields)}) VALUES ({placeholders})", values)
+        self._snapshot(conn, table, cur.lastrowid)
         return cur.lastrowid
 
-    @staticmethod
-    def _update(conn, table: str, fields: tuple[str, ...], obj) -> None:
+    def _update(self, conn, table: str, fields: tuple[str, ...], obj) -> None:
         if obj.id is None:
             raise ValueError("Cannot update a record without an id")
         assignments = ", ".join(f"{f} = ?" for f in fields)
         values = [_db_value(getattr(obj, f)) for f in fields] + [obj.id]
         conn.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", values)
+        self._snapshot(conn, table, obj.id)
+
+    # ------------------------------------------------------------------ cost history
+
+    _HISTORY_TYPES = {"legs": "leg", "expenses": "expense"}
+
+    def _snapshot(self, conn, table: str, record_id: int) -> None:
+        """Record a leg's/expense's cost fields if they differ from its latest snapshot.
+
+        Called on every insert/update, so all write paths (forms, apply, import,
+        demo) build history; edits to notes, names or dates add nothing.
+        """
+        record_type = self._HISTORY_TYPES.get(table)
+        if record_type is None:
+            return
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (record_id,)).fetchone()
+        if record_type == "leg":
+            amount, quantity = str(Decimal(row["base_fare"]) + Decimal(row["extra_costs"])), "1"
+        else:
+            amount, quantity = row["unit_price"], row["quantity"]
+            if row["nights_from_stop"] and row["destination_id"] is not None:
+                stop = conn.execute("SELECT arrival, departure FROM destinations WHERE id = ?",
+                                    (row["destination_id"],)).fetchone()
+                if stop and stop["arrival"] and stop["departure"]:
+                    nights = (_date_in(stop["departure"]) - _date_in(stop["arrival"])).days
+                    if nights >= 0:
+                        quantity = str(nights)  # the live quantity the cost calculation uses
+        current = (row["status"], amount, quantity, row["currency"], row["basis"])
+        latest = conn.execute(
+            "SELECT status, amount, quantity, currency, basis FROM cost_history"
+            " WHERE record_type = ? AND record_id = ? ORDER BY id DESC LIMIT 1",
+            (record_type, record_id),
+        ).fetchone()
+        if latest is not None and tuple(latest) == current:
+            return
+        conn.execute(
+            "INSERT INTO cost_history (trip_id, record_type, record_id, recorded_at, status, amount, quantity,"
+            " currency, basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["trip_id"], record_type, record_id, datetime.now().isoformat(timespec="seconds"), *current),
+        )
+
+    @staticmethod
+    def _row_to_snapshot(row) -> CostSnapshot:
+        return CostSnapshot(
+            record_type=row["record_type"], record_id=row["record_id"], recorded_at=row["recorded_at"],
+            status=row["status"], amount=Decimal(row["amount"]), quantity=Decimal(row["quantity"]),
+            currency=row["currency"], basis=row["basis"],
+        )
+
+    def cost_history(self, record_type: str, record_id: int) -> list[CostSnapshot]:
+        """Every recorded cost state of one leg or expense, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cost_history WHERE record_type = ? AND record_id = ? ORDER BY id",
+                (record_type, record_id),
+            ).fetchall()
+        return [self._row_to_snapshot(r) for r in rows]
+
+    def first_snapshots(self, trip_id: int) -> dict[tuple[str, int], CostSnapshot]:
+        """The earliest recorded cost state of each leg/expense in a trip."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT h.* FROM cost_history h JOIN ("
+                "  SELECT MIN(id) AS id FROM cost_history WHERE trip_id = ? GROUP BY record_type, record_id"
+                ") first ON first.id = h.id",
+                (trip_id,),
+            ).fetchall()
+        return {(r["record_type"], r["record_id"]): self._row_to_snapshot(r) for r in rows}
 
     # ------------------------------------------------------------------ meta
 
@@ -298,6 +378,11 @@ class Repository:
     def update_destination(self, dest: Destination) -> None:
         with self._connect() as conn:
             self._update(conn, "destinations", DEST_FIELDS, dest)
+            # Accommodation priced by this stop's nights changes cost when dates change.
+            for row in conn.execute(
+                "SELECT id FROM expenses WHERE destination_id = ? AND nights_from_stop = 1", (dest.id,)
+            ).fetchall():
+                self._snapshot(conn, "expenses", row["id"])
 
     def delete_destination(self, dest_id: int) -> None:
         with self._connect() as conn:
@@ -359,6 +444,7 @@ class Repository:
     def delete_leg(self, leg_id: int) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM legs WHERE id = ?", (leg_id,))
+            conn.execute("DELETE FROM cost_history WHERE record_type = 'leg' AND record_id = ?", (leg_id,))
             conn.execute("UPDATE route_options SET headline_leg_id = NULL WHERE headline_leg_id = ?", (leg_id,))
 
     def set_leg_order(self, trip_id: int, ordered_ids: list[int], option_id: int | None = None) -> None:
@@ -411,6 +497,7 @@ class Repository:
     def delete_expense(self, expense_id: int) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+            conn.execute("DELETE FROM cost_history WHERE record_type = 'expense' AND record_id = ?", (expense_id,))
 
     # ------------------------------------------------------------------ route options
 
@@ -452,6 +539,15 @@ class Repository:
         """Deletes the option and its legs/expenses (never touches the active itinerary)."""
         with self._connect() as conn:
             conn.execute("DELETE FROM route_options WHERE id = ?", (option_id,))
+            self._prune_history(conn)
+
+    @staticmethod
+    def _prune_history(conn) -> None:
+        """Remove history of legs/expenses deleted by a cascade."""
+        conn.execute("DELETE FROM cost_history WHERE record_type = 'leg'"
+                     " AND record_id NOT IN (SELECT id FROM legs)")
+        conn.execute("DELETE FROM cost_history WHERE record_type = 'expense'"
+                     " AND record_id NOT IN (SELECT id FROM expenses)")
 
     def apply_option(self, option_id: int, replace_leg_ids: list[int], replace_expense_ids: list[int]) -> int:
         """Make an option part of the active itinerary, in one transaction.
